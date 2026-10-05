@@ -2,11 +2,11 @@
 
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+import asyncio
 import json
 import os
-from typing import List, Optional
+from typing import AsyncIterator, List
 import requests
-import urllib.parse
 import dotenv
 import websockets
 
@@ -84,12 +84,7 @@ class NewsSignal:
             f"╚══════════════════════════════════════╝"
         )
     
-def ingest_from_alpaca(news_data: dict, historical: bool = False) -> NewsArticle:
-    published_at = datetime.fromisoformat(news_data['created_at'])
-    received_at = (
-        published_at + HISTORICAL_RECEIVED_DELAY
-        if historical else datetime.now(timezone.utc)
-    )
+def ingest_from_alpaca(news_data: dict, received_at: datetime) -> NewsArticle:
     return NewsArticle(
         article_id=news_data['id'],
         headline=news_data['headline'],
@@ -97,7 +92,7 @@ def ingest_from_alpaca(news_data: dict, historical: bool = False) -> NewsArticle
         content=news_data.get('content') or '',
         source=news_data.get('source') or news_data.get('author') or '',
         symbols=news_data.get('symbols') or [],
-        published_at=published_at,
+        published_at=datetime.fromisoformat(news_data.get('created_at')),
         received_at=received_at,
     )
 
@@ -136,23 +131,72 @@ async def stream_news():
                 if event.get("T") == "n":
                     yield ingest_from_alpaca(event)
 
-def retrieve_historical_news(start_date: datetime, end_date: datetime, limit: int) -> List[NewsArticle]:
-    fields = {
-        "start": start_date.isoformat(),
-        "end": end_date.isoformat(),
-        "limit": limit
-    }
-    
-    query = HISTORICAL_NEWS_API_URL + "?" + urllib.parse.urlencode(fields)
-    
-    response = requests.get(query, headers = {
+async def stream_historical_news(
+    start_date: datetime,
+    end_date: datetime,
+) -> AsyncIterator[NewsArticle]:
+
+    if not ALPACA_API_KEY or not ALPACA_API_SECRET:
+        raise RuntimeError(
+            "Set ALPACA_API_KEY and ALPACA_SECRET_KEY "
+            "to retrieve historical news"
+        )
+
+    headers = {
         "accept": "application/json",
         "APCA-API-KEY-ID": ALPACA_API_KEY,
-        "APCA-API-SECRET-KEY": ALPACA_API_SECRET
-    })
-        
-    if response.status_code != 200:
-        raise Exception(f"Failed to retrieve news articles: {response.status_code} - {response.text}")
-    
-    return [ingest_from_alpaca(article, True) for article in response.json()["news"]]
-    
+        "APCA-API-SECRET-KEY": ALPACA_API_SECRET,
+    }
+
+    page_token = None
+
+    while True:
+
+        params = {
+            "start": start_date.isoformat(),
+            "end": end_date.isoformat(),
+            "limit": 50,
+            "sort": "asc",
+        }
+
+        if page_token is not None:
+            params["page_token"] = page_token
+
+        response = await asyncio.to_thread(
+            requests.get,
+            HISTORICAL_NEWS_API_URL,
+            params=params,
+            headers=headers,
+            timeout=30,
+        )
+
+        if response.status_code != 200:
+            raise RuntimeError(
+                "Failed to retrieve historical news: "
+                f"{response.status_code} - {response.text}"
+            )
+
+        payload = response.json()
+
+        articles = payload.get("news", [])
+
+        for raw_article in articles:
+
+            published_at = datetime.fromisoformat(
+                raw_article["created_at"]
+            )
+
+            received_at = (
+                published_at
+                + HISTORICAL_RECEIVED_DELAY
+            )
+
+            yield ingest_from_alpaca(
+                raw_article,
+                received_at=received_at,
+            )
+
+        page_token = payload.get("next_page_token")
+
+        if not page_token:
+            break
