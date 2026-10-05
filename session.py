@@ -3,6 +3,9 @@ from dataclasses import dataclass, field
 from enum import Enum
 from uuid import uuid4
 
+import news
+
+
 class SessionType(Enum):
     LIVE = "live"
     HISTORICAL = "historical"
@@ -63,3 +66,19 @@ class Session:
             raise ValueError("Cannot set time backwards")
 
         self._current_time = time
+
+    async def news(self):
+        if self.config.type == SessionType.LIVE:
+            async for article in news.stream_news():
+                yield article
+        else:
+            if self.config.start is None or self.config.end is None:
+                raise ValueError("Session has no start or end time")
+
+            async for article in news.stream_historical_news(
+                    self.config.start, self.config.end
+            ):
+                self.set_time(article.published_at)
+
+                yield article
+
