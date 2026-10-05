@@ -15,6 +15,7 @@ from alpaca.data.requests import (
 from alpaca.data.timeframe import TimeFrame
 
 from news import NewsArticle
+from session import Session, SessionType
 
 
 dotenv.load_dotenv()
@@ -107,35 +108,29 @@ def get_minute_bars(ticker: str, start: datetime, end: datetime) -> list:
         bars = list(response[ticker])
     except (KeyError, TypeError):
         bars = []
-    return sorted(bars, key=lambda bar: _utc(bar.timestamp))
+    return sorted(
+        bars,
+        key=lambda bar: _utc(bar.timestamp)
+    )
 
-
-def get_current_price(ticker: str) -> float:
-    """Return the latest quote midpoint, falling back to its available side."""
-    quotes = _DATA_CLIENT.get_stock_latest_quote(StockLatestQuoteRequest(
-        symbol_or_symbols=ticker,
-        feed=DataFeed.IEX,
-    ))
-    quote = quotes[ticker]
-    bid = float(quote.bid_price or 0)
-    ask = float(quote.ask_price or 0)
-    if bid > 0 and ask > 0:
-        return (bid + ask) / 2
-    if ask > 0:
-        return ask
-    if bid > 0:
-        return bid
-    return math.nan
-
-
-def get_price_at(ticker: str, timestamp: datetime) -> float:
-    """Return the last minute-bar close at or before a timestamp."""
+def get_price_at(
+        ticker: str,
+        timestamp: datetime
+) -> float:
     timestamp = _utc(timestamp)
-    bars = get_minute_bars(ticker, timestamp - timedelta(days=7), timestamp)
-    for bar in reversed(bars):
-        if _utc(bar.timestamp) <= timestamp:
-            return float(bar.close)
-    return math.nan
+
+    bars = get_minute_bars(
+        ticker,
+        timestamp - timedelta(days=7),
+        timestamp
+    )
+
+    if not bars:
+        return math.nan
+
+    return float(
+        bars[-1].close
+    )
 
 
 def _pct_return(new: float, old: float) -> float:
@@ -148,56 +143,107 @@ def _recent_metrics(bars):
     if not bars:
         return math.nan, math.nan, math.nan, 0, 0, math.nan, None
 
-    closes = [float(bar.close) for bar in bars]
-    volumes = [int(bar.volume) for bar in bars]
+    closes = [
+        float(bar.close)
+        for bar in bars
+    ]
+
+    volumes = [
+        int(bar.volume)
+        for bar in bars
+    ]
+
     price = closes[-1]
     volume = volumes[-1]
+
+    # previous 20 minute bars
     prior_volumes = volumes[-21:-1]
-    avg_volume = int(round(sum(prior_volumes) / len(prior_volumes))) if prior_volumes else 0
+
+    if prior_volumes:
+        avg_volume = int(round(sum(prior_volumes) / len(prior_volumes)))
+    else:
+        avg_volume = 0
+
     relative_volume = volume / avg_volume if avg_volume else math.nan
 
     return_1m = _pct_return(price, closes[-2]) if len(closes) >= 2 else math.nan
     return_5m = _pct_return(price, closes[-6]) if len(closes) >= 6 else math.nan
 
-    # Standard deviation of the most recent 30 one-minute log returns.
-    returns = [math.log(b / a) for a, b in zip(closes[-31:-1], closes[-30:]) if a > 0 and b > 0]
+    #stdev of most recent 30 min log returns
+    recent_closes = closes[-31:]
+
+    log_returns = [
+        math.log(new / old)
+        for old, new in zip(
+            recent_closes,
+            recent_closes[1:]
+        )
+
+        if old > 0 and new > 0
+    ]
+
     volatility = None
-    if len(returns) >= 2:
-        mean = sum(returns) / len(returns)
-        volatility = math.sqrt(sum((value - mean) ** 2 for value in returns) / (len(returns) - 1))
+
+    if len(log_returns) >= 2:
+        mean = sum(log_returns) / len(log_returns)
+        variance = sum(
+            (value - mean) ** 2
+            for value in log_returns
+        ) / (len(log_returns) - 1)
+
+        volatility = math.sqrt(variance)
 
     return price, return_1m, return_5m, volume, avg_volume, relative_volume, volatility
 
 
 
-def create_from_article(article: NewsArticle, historical: bool = False) -> list[MarketContext]:
+def create_from_article(article: NewsArticle, current_time: datetime) -> list[MarketContext]:
     published_at = _utc(article.published_at)
-    captured_at = published_at if historical else datetime.now(timezone.utc)
-    mcs: list[MarketContext] = []
+    captured_at = _utc(current_time)
+
+    contexts: list[MarketContext] = []
+
+    spy_return_5m = None
+
+    try:
+        spy_bars = get_minute_bars(
+            _SPY, captured_at - timedelta(minutes=10), captured_at
+        )
+        (
+            _,
+            _,
+            spy_return_5m,
+            _,
+            _,
+            _,
+            _,
+        ) = _recent_metrics(spy_bars)
+        if not math.isfinite(spy_return_5m):
+            spy_return_5m = None
+    except Exception:
+        spy_return_5m = None
 
     for ticker in dict.fromkeys(article.symbols):
-        price_at_news = get_price_at(ticker, published_at)
-        signal_bars = get_minute_bars(
-            ticker, captured_at - timedelta(minutes=40), captured_at
+
+        price_at_news = get_price_at(
+            ticker,
+            published_at
         )
-        (price_at_signal, return_1m, return_5m, volume, avg_volume,
-         relative_volume, realized_volatility) = _recent_metrics(signal_bars)
+        signal_bars = get_minute_bars(
+            ticker,
+            captured_at - timedelta(minutes=40),
+            captured_at
+        )
 
-        if not historical:
-            price_at_signal = get_current_price(ticker)
+        (price_at_signal,
+         return_1m,
+         return_5m,
+         volume,
+         avg_volume,
+         relative_volume,
+         realized_volatility) = _recent_metrics(signal_bars)
 
-        spy_return_5m = None
-        try:
-            spy_bars = get_minute_bars(
-                _SPY, captured_at - timedelta(minutes=10), captured_at
-            )
-            _, _, spy_return_5m, _, _, _, _ = _recent_metrics(spy_bars)
-            if not math.isfinite(spy_return_5m):
-                spy_return_5m = None
-        except Exception:
-            spy_return_5m = None
-
-        mcs.append(MarketContext(
+        context = MarketContext(
             article_id=article.article_id,
             ticker=ticker,
             price_at_news=price_at_news,
@@ -211,6 +257,7 @@ def create_from_article(article: NewsArticle, historical: bool = False) -> list[
             realized_volatility=realized_volatility,
             spy_return_5m=spy_return_5m,
             captured_at=captured_at,
-        ))
+        )
+        contexts.append(context)
 
-    return mcs
+    return contexts
