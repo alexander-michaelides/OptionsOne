@@ -2,10 +2,13 @@ import sqlite3
 import json
 from datetime import datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-from session import Session
 from news import NewsArticle, NewsSignal
 from market import MarketContext
+
+if TYPE_CHECKING:
+    from session import Session
 
 DEFAULT_DB_PATH = "data/trading.db"
 

@@ -80,7 +80,8 @@ class Session:
             async for article in news.stream_historical_news(
                     self.config.start, self.config.end
             ):
-                self.set_time(article.published_at)
+                if self._current_time is None or article.published_at > self._current_time:
+                    self.set_time(article.published_at)
 
                 yield article
 

@@ -251,7 +251,6 @@ def create_from_article(article: NewsArticle, current_time: datetime) -> list[Ma
         except APIError as exc:
             if "invalid symbol" not in str(exc).lower():
                 raise
-            print(f"Skipping market data for unsupported Alpaca symbol {ticker}: {exc}")
             continue
 
         (price_at_signal,
