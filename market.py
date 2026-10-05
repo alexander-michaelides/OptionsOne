@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 import math
 import os
+import time
 
 import dotenv
 from alpaca.common.exceptions import APIError
@@ -14,6 +15,7 @@ from alpaca.data.requests import (
     StockLatestQuoteRequest,
 )
 from alpaca.data.timeframe import TimeFrame
+from requests.exceptions import RequestException
 
 from news import NewsArticle
 
@@ -28,6 +30,33 @@ if not ALPACA_API_KEY or not ALPACA_API_SECRET:
 _DATA_CLIENT = StockHistoricalDataClient(ALPACA_API_KEY, ALPACA_API_SECRET)
 
 _SPY = "SPY"
+_API_ATTEMPTS = 4
+
+
+def _alpaca_request(request):
+    """Retry rate limits and transient Alpaca/network errors with backoff."""
+    for attempt in range(_API_ATTEMPTS):
+        try:
+            return request()
+        except APIError as exc:
+            retryable = exc.status_code == 429 or (
+                exc.status_code is not None and exc.status_code >= 500
+            )
+            if not retryable or attempt == _API_ATTEMPTS - 1:
+                raise
+
+            retry_after = None
+            if exc.response is not None:
+                retry_after = exc.response.headers.get("Retry-After")
+            try:
+                delay = float(retry_after) if retry_after else 2 ** (attempt + 1)
+            except ValueError:
+                delay = 2 ** (attempt + 1)
+            time.sleep(min(delay, 60))
+        except RequestException:
+            if attempt == _API_ATTEMPTS - 1:
+                raise
+            time.sleep(2 ** (attempt + 1))
 
 
 @dataclass
@@ -110,14 +139,17 @@ def _utc(timestamp: datetime) -> datetime:
 
 def get_minute_bars(ticker: str, start: datetime, end: datetime) -> list:
     """Fetch sorted IEX one-minute bars for a ticker and time range."""
-    response = _DATA_CLIENT.get_stock_bars(StockBarsRequest(
+    request = StockBarsRequest(
         symbol_or_symbols=ticker,
         timeframe=TimeFrame.Minute,
         start=_utc(start),
         end=_utc(end),
         feed=DataFeed.IEX,
         limit=10000,
-    ))
+    )
+    response = _alpaca_request(
+        lambda: _DATA_CLIENT.get_stock_bars(request)
+    )
     try:
         bars = list(response[ticker])
     except (KeyError, TypeError):
@@ -234,7 +266,8 @@ def create_from_article(article: NewsArticle, current_time: datetime) -> list[Ma
         ) = _recent_metrics(spy_bars)
         if not math.isfinite(spy_return_5m):
             spy_return_5m = None
-    except Exception:
+    except (APIError, RequestException) as exc:
+        print(f"Warning: SPY market data unavailable after retries: {exc}")
         spy_return_5m = None
 
     for ticker in dict.fromkeys(article.symbols):

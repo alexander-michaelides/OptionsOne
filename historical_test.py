@@ -1,4 +1,5 @@
 import asyncio
+import argparse
 import os
 import warnings
 from datetime import datetime, timezone
@@ -22,33 +23,34 @@ from session import Session, SessionConfig, SessionType
 from storage import Storage
 
 
-async def run_historical():
-    config = SessionConfig(
-        name="historical-test",
-        type=SessionType.HISTORICAL,
-        start=datetime(2026, 9, 25, 14, 0, tzinfo=timezone.utc),
-        end=datetime(2026, 9, 25, 15, 0, tzinfo=timezone.utc),
-    )
-
+async def run_historical(resume_session_id: str | None = None):
     print("Initializing...")
     router = Router(preload=True, token=os.getenv("HF_TOKEN"))
     print("Router initialized.")
 
     storage = Storage()
-    session = Session(config, storage)
-    storage.save_session(session)
+    if resume_session_id:
+        session = Session.resume(resume_session_id, storage)
+        config = session.config
+        print(f"Resuming session: {session.id}")
+    else:
+        config = SessionConfig(
+            name="historical-test",
+            type=SessionType.HISTORICAL,
+            start=datetime(2026, 9, 20, 14, 0, tzinfo=timezone.utc),
+            end=datetime(2026, 9, 22, 15, 0, tzinfo=timezone.utc),
+        )
+        session = Session(config, storage)
+        storage.save_session(session)
+
     session.start()
 
     print(f"Session: {session.id}")
     print(f"Range:   {config.start} -> {config.end}")
     print()
 
-    article_count = 0
-    result_count = 0
-
     try:
         async for article in session.news():
-            article_count += 1
             current_time = session.now()
 
             signals = agent.analyze_article(router, article)
@@ -111,9 +113,17 @@ async def run_historical():
                         f"{'✓ CORRECT' if correct else '✗ WRONG'}"
                     )
 
-                result_count += 1
+            session.mark_processed(article)
+            print(
+                f"Progress: {session.progress():6.1%} | "
+                f"Articles: {session.articles_processed} | "
+                f"Through: {current_time.isoformat(timespec='seconds')}"
+            )
 
         session.complete()
+        print(
+            f"Progress: 100.0% | Articles: {session.articles_processed} | Complete"
+        )
     except Exception:
         session.fail()
         raise
@@ -206,4 +216,13 @@ def evaluate_results(storage, session_id: str):
         )
 
 if __name__ == "__main__":
-    asyncio.run(run_historical())
+    parser = argparse.ArgumentParser(
+        description="Collect and score historical news market data."
+    )
+    parser.add_argument(
+        "--resume",
+        metavar="SESSION_ID",
+        help="continue an incomplete historical session by its printed ID",
+    )
+    args = parser.parse_args()
+    asyncio.run(run_historical(args.resume))

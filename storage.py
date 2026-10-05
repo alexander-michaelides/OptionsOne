@@ -104,6 +104,14 @@ class Storage:
                 )
             );
 
+            CREATE TABLE IF NOT EXISTS session_progress (
+                session_id TEXT PRIMARY KEY,
+                article_id INTEGER NOT NULL,
+                published_at TEXT NOT NULL,
+                articles_processed INTEGER NOT NULL DEFAULT 0,
+                FOREIGN KEY (session_id) REFERENCES sessions(id)
+            );
+
 
             CREATE INDEX IF NOT EXISTS
                 idx_results_session
@@ -122,6 +130,44 @@ class Storage:
         )
 
         self.connection.commit()
+
+    def get_session(self, session_id: str) -> sqlite3.Row | None:
+        cursor = self.connection.execute(
+            "SELECT * FROM sessions WHERE id = ?",
+            (session_id,),
+        )
+        return cursor.fetchone()
+
+    def get_session_progress(self, session_id: str) -> sqlite3.Row | None:
+        cursor = self.connection.execute(
+            "SELECT article_id, published_at, articles_processed "
+            "FROM session_progress WHERE session_id = ?",
+            (session_id,),
+        )
+        return cursor.fetchone()
+
+    def save_session_progress(
+            self,
+            session_id: str,
+            article_id: int,
+            published_at: datetime,
+    ) -> int:
+        self.connection.execute(
+            """
+            INSERT INTO session_progress (
+                session_id, article_id, published_at, articles_processed
+            )
+            VALUES (?, ?, ?, 1)
+            ON CONFLICT(session_id) DO UPDATE SET
+                article_id = excluded.article_id,
+                published_at = excluded.published_at,
+                articles_processed = session_progress.articles_processed + 1
+            """,
+            (session_id, article_id, self._datetime(published_at)),
+        )
+        self.connection.commit()
+        row = self.get_session_progress(session_id)
+        return row["articles_processed"]
 
     def save_session(
             self,

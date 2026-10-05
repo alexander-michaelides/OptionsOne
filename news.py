@@ -5,14 +5,47 @@ from datetime import datetime, timedelta, timezone
 import asyncio
 import json
 import os
+import time
 from typing import AsyncIterator, List
 import requests
+from requests.exceptions import RequestException
 import dotenv
 import websockets
 
 HISTORICAL_NEWS_API_URL = "https://data.alpaca.markets/v1beta1/news"
 NEWS_STREAM_URL = "wss://stream.data.alpaca.markets/v1beta1/news"
 HISTORICAL_RECEIVED_DELAY = timedelta(seconds=30)
+HISTORICAL_API_ATTEMPTS = 5
+
+
+def _get_historical_page(params: dict, headers: dict):
+    """Retry transient HTTP failures and Alpaca rate limits."""
+    for attempt in range(HISTORICAL_API_ATTEMPTS):
+        try:
+            response = requests.get(
+                HISTORICAL_NEWS_API_URL,
+                params=params,
+                headers=headers,
+                timeout=30,
+            )
+        except RequestException:
+            if attempt == HISTORICAL_API_ATTEMPTS - 1:
+                raise
+            time.sleep(min(2 ** attempt, 30))
+            continue
+
+        if response.status_code == 429 or response.status_code >= 500:
+            if attempt == HISTORICAL_API_ATTEMPTS - 1:
+                return response
+            retry_after = response.headers.get("Retry-After")
+            try:
+                delay = float(retry_after) if retry_after else 2 ** attempt
+            except ValueError:
+                delay = 2 ** attempt
+            time.sleep(min(delay, 60))
+            continue
+
+        return response
 
 dotenv.load_dotenv()
 ALPACA_API_KEY = os.getenv("ALPACA_API_KEY")
@@ -163,11 +196,9 @@ async def stream_historical_news(
             params["page_token"] = page_token
 
         response = await asyncio.to_thread(
-            requests.get,
-            HISTORICAL_NEWS_API_URL,
-            params=params,
-            headers=headers,
-            timeout=30,
+            _get_historical_page,
+            params,
+            headers,
         )
 
         if response.status_code != 200:
