@@ -167,9 +167,14 @@ def _recent_metrics(bars):
     return price, return_1m, return_5m, volume, avg_volume, relative_volume, volatility
 
 
-def create_from_article(article: NewsArticle) -> list[MarketContext]:
+def create_from_article(article: NewsArticle, historical:bool=False) -> list[MarketContext]:
     published_at = _utc(article.published_at)
-    captured_at = datetime.now(timezone.utc)
+
+    if historical:
+        captured_at = published_at + timedelta(milliseconds=10)
+    else:
+        captured_at = datetime.now(timezone.utc)
+
     mcs: list[MarketContext] = []
 
     for ticker in dict.fromkeys(article.symbols):

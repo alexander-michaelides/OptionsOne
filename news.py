@@ -1,7 +1,7 @@
 # handles news streaming and processing
 
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import json
 import os
 from typing import List, Optional
@@ -12,6 +12,7 @@ import websockets
 
 HISTORICAL_NEWS_API_URL = "https://data.alpaca.markets/v1beta1/news"
 NEWS_STREAM_URL = "wss://stream.data.alpaca.markets/v1beta1/news"
+HISTORICAL_RECEIVED_DELAY = timedelta(seconds=30)
 
 dotenv.load_dotenv()
 ALPACA_API_KEY = os.getenv("ALPACA_API_KEY")
@@ -83,7 +84,12 @@ class NewsSignal:
             f"╚══════════════════════════════════════╝"
         )
     
-def ingest_from_alpaca(news_data: dict) -> NewsArticle:
+def ingest_from_alpaca(news_data: dict, historical: bool = False) -> NewsArticle:
+    published_at = datetime.fromisoformat(news_data['created_at'])
+    received_at = (
+        published_at + HISTORICAL_RECEIVED_DELAY
+        if historical else datetime.now(timezone.utc)
+    )
     return NewsArticle(
         article_id=news_data['id'],
         headline=news_data['headline'],
@@ -91,7 +97,8 @@ def ingest_from_alpaca(news_data: dict) -> NewsArticle:
         content=news_data.get('content') or '',
         source=news_data.get('source') or news_data.get('author') or '',
         symbols=news_data.get('symbols') or [],
-        published_at=datetime.fromisoformat(news_data['created_at']),
+        published_at=published_at,
+        received_at=received_at,
     )
 
 
@@ -147,5 +154,5 @@ def retrieve_historical_news(start_date: datetime, end_date: datetime, limit: in
     if response.status_code != 200:
         raise Exception(f"Failed to retrieve news articles: {response.status_code} - {response.text}")
     
-    return [ingest_from_alpaca(article) for article in response.json()["news"]]
+    return [ingest_from_alpaca(article, True) for article in response.json()["news"]]
     
