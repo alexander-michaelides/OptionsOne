@@ -8,7 +8,10 @@ import os
 import dotenv
 from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.enums import DataFeed
-from alpaca.data.requests import StockBarsRequest
+from alpaca.data.requests import (
+    StockBarsRequest,
+    StockLatestQuoteRequest,
+)
 from alpaca.data.timeframe import TimeFrame
 
 from news import NewsArticle
@@ -22,6 +25,7 @@ if not ALPACA_API_KEY or not ALPACA_API_SECRET:
     raise RuntimeError("Set ALPACA_API_KEY and ALPACA_SECRET_KEY to retrieve market data")
 
 _DATA_CLIENT = StockHistoricalDataClient(ALPACA_API_KEY, ALPACA_API_SECRET)
+
 _SPY = "SPY"
 
 
@@ -88,52 +92,50 @@ def _utc(timestamp: datetime) -> datetime:
         return timestamp.replace(tzinfo=timezone.utc)
     return timestamp.astimezone(timezone.utc)
 
-def _fetch_minute_bars(ticker: str, start: datetime, end: datetime):
-    request = StockBarsRequest(
+
+def get_minute_bars(ticker: str, start: datetime, end: datetime) -> list:
+    """Fetch sorted IEX one-minute bars for a ticker and time range."""
+    response = _DATA_CLIENT.get_stock_bars(StockBarsRequest(
         symbol_or_symbols=ticker,
         timeframe=TimeFrame.Minute,
-        start=start,
-        end=end,
+        start=_utc(start),
+        end=_utc(end),
         feed=DataFeed.IEX,
         limit=10000,
-    )
-    return _DATA_CLIENT.get_stock_bars(request)
-
-
-def _extract_bars(response, ticker: str):
-    """Normalize Alpaca BarSet, mapping, and iterable response shapes."""
+    ))
     try:
-        values = response[ticker]
+        bars = list(response[ticker])
     except (KeyError, TypeError):
-        values = response
-
-    def collect(value):
-        if hasattr(value, "timestamp") and hasattr(value, "close"):
-            return [value]
-        if isinstance(value, dict):
-            result = []
-            for child in value.values():
-                result.extend(collect(child))
-            return result
-        if isinstance(value, (tuple, list)):
-            result = []
-            for child in value:
-                result.extend(collect(child))
-            return result
-        return []
-
-    return collect(values)
+        bars = []
+    return sorted(bars, key=lambda bar: _utc(bar.timestamp))
 
 
-def _price_at_from_bars(bars, timestamp: datetime) -> float:
-    eligible = [bar for bar in bars if _utc(bar.timestamp) <= timestamp]
-    return float(eligible[-1].close) if eligible else math.nan
+def get_current_price(ticker: str) -> float:
+    """Return the latest quote midpoint, falling back to its available side."""
+    quotes = _DATA_CLIENT.get_stock_latest_quote(StockLatestQuoteRequest(
+        symbol_or_symbols=ticker,
+        feed=DataFeed.IEX,
+    ))
+    quote = quotes[ticker]
+    bid = float(quote.bid_price or 0)
+    ask = float(quote.ask_price or 0)
+    if bid > 0 and ask > 0:
+        return (bid + ask) / 2
+    if ask > 0:
+        return ask
+    if bid > 0:
+        return bid
+    return math.nan
 
 
 def get_price_at(ticker: str, timestamp: datetime) -> float:
+    """Return the last minute-bar close at or before a timestamp."""
     timestamp = _utc(timestamp)
-    response = _fetch_minute_bars(ticker, timestamp - timedelta(days=7), timestamp)
-    return _price_at_from_bars(_extract_bars(response, ticker), timestamp)
+    bars = get_minute_bars(ticker, timestamp - timedelta(days=7), timestamp)
+    for bar in reversed(bars):
+        if _utc(bar.timestamp) <= timestamp:
+            return float(bar.close)
+    return math.nan
 
 
 def _pct_return(new: float, old: float) -> float:
@@ -167,31 +169,27 @@ def _recent_metrics(bars):
     return price, return_1m, return_5m, volume, avg_volume, relative_volume, volatility
 
 
-def create_from_article(article: NewsArticle, historical:bool=False) -> list[MarketContext]:
+
+def create_from_article(article: NewsArticle, historical: bool = False) -> list[MarketContext]:
     published_at = _utc(article.published_at)
-
-    if historical:
-        captured_at = published_at + timedelta(milliseconds=10)
-    else:
-        captured_at = datetime.now(timezone.utc)
-
+    captured_at = published_at if historical else datetime.now(timezone.utc)
     mcs: list[MarketContext] = []
 
     for ticker in dict.fromkeys(article.symbols):
-        news_bars = _extract_bars(
-            _fetch_minute_bars(ticker, published_at - timedelta(days=7), published_at), ticker
+        price_at_news = get_price_at(ticker, published_at)
+        signal_bars = get_minute_bars(
+            ticker, captured_at - timedelta(minutes=40), captured_at
         )
-        signal_bars = _extract_bars(
-            _fetch_minute_bars(ticker, captured_at - timedelta(minutes=40), captured_at), ticker
-        )
-        price_at_news = _price_at_from_bars(news_bars, published_at)
         (price_at_signal, return_1m, return_5m, volume, avg_volume,
          relative_volume, realized_volatility) = _recent_metrics(signal_bars)
 
+        if not historical:
+            price_at_signal = get_current_price(ticker)
+
         spy_return_5m = None
         try:
-            spy_bars = _extract_bars(
-                _fetch_minute_bars(_SPY, captured_at - timedelta(minutes=10), captured_at), _SPY
+            spy_bars = get_minute_bars(
+                _SPY, captured_at - timedelta(minutes=10), captured_at
             )
             _, _, spy_return_5m, _, _, _, _ = _recent_metrics(spy_bars)
             if not math.isfinite(spy_return_5m):
