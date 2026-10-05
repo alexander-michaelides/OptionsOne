@@ -5,24 +5,24 @@ import math
 from news import NewsSignal
 from market import MarketContext
 
-def score(news: NewsSignal, market: MarketContext) -> float:
+def score(signal: NewsSignal, ctx: MarketContext) -> float:
 
     # general quality weights based on news
     # TODO: backtest/train weights
     news_quality = (
-            0.30 * abs(news.direction)
-            + 0.25 * news.materiality
-            + 0.20 * news.novelty
-            + 0.10 * news.market_relevance
-            + 0.10 * news.company_relevance
-            + 0.05 * news.certainty
+            0.30 * abs(signal.direction)
+            + 0.25 * signal.materiality
+            + 0.20 * signal.novelty
+            + 0.10 * signal.market_relevance
+            + 0.10 * signal.company_relevance
+            + 0.05 * signal.certainty
     )
 
     # penalize news that agent believes was already known
-    news_quality *= (1.0 - news.already_known)
+    news_quality *= (1.0 - signal.already_known)
 
     # how much the market has moved since the news, no use in trading off of a signal that already moved
-    move = abs(market.return_since_news)
+    move = abs(ctx.return_since_news)
 
     if move < 0.0025:  # < 0.25%
         freshness = 1.00
@@ -41,7 +41,7 @@ def score(news: NewsSignal, market: MarketContext) -> float:
 
     # relative market volume
 
-    rv = market.relative_volume
+    rv = ctx.relative_volume
 
     if rv >= 2.0:
         volume_quality = 1.00
@@ -60,15 +60,15 @@ def score(news: NewsSignal, market: MarketContext) -> float:
 
 
     # checking if the direction predicted by agent is aligned with the stock direction
-    direction = news.direction
+    direction = signal.direction
 
-    if market.return_5m is None or not math.isfinite(market.return_5m):
+    if ctx.return_5m is None or not math.isfinite(ctx.return_5m):
         alignment = 0.50
 
-    elif direction * market.return_5m > 0:
+    elif direction * ctx.return_5m > 0:
         alignment = 1.00
 
-    elif abs(market.return_5m) < 0.001:
+    elif abs(ctx.return_5m) < 0.001:
         alignment = 0.70
 
     else:
