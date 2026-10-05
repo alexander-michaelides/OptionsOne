@@ -4,7 +4,7 @@ from enum import Enum
 from uuid import uuid4
 
 import news
-
+from storage import Storage
 
 class SessionType(Enum):
     LIVE = "live"
@@ -32,9 +32,11 @@ class Session:
     def __init__(
         self,
         config: SessionConfig,
+        storage: Storage,
     ):
         self.id = str(uuid4())
         self.config = config
+        self.storage = storage
 
         self.status = SessionStatus.CREATED
 
@@ -82,3 +84,20 @@ class Session:
 
                 yield article
 
+    def start(self):
+        self.status = SessionStatus.RUNNING
+        self.started_at = datetime.now(timezone.utc)
+
+        self.storage.save_session(self)
+
+    def complete(self):
+        self.status = SessionStatus.COMPLETED
+        self.ended_at = datetime.now(timezone.utc)
+
+        self.storage.save_session(self)
+
+    def fail(self):
+        self.status = SessionStatus.FAILED
+        self.ended_at = datetime.now(timezone.utc)
+
+        self.storage.save_session(self)
