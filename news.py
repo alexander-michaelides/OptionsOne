@@ -92,7 +92,42 @@ def ingest_from_alpaca(news_data: dict) -> NewsArticle:
         published_at=datetime.fromisoformat(news_data['created_at']),
     )
 
-def retrive_historical_news(start_date: datetime, end_date: datetime, limit: int) -> List[NewsArticle]:
+
+async def stream_news():
+    """Yield NewsArticle objects from Alpaca's live news WebSocket stream."""
+    if not ALPACA_API_KEY or not ALPACA_API_SECRET:
+        raise RuntimeError("Set ALPACA_API_KEY and ALPACA_SECRET_KEY to stream news")
+
+    async with websockets.connect(NEWS_STREAM_URL, ping_interval=20, ping_timeout=20) as ws:
+        await ws.send(json.dumps({
+            "action": "auth",
+            "key": ALPACA_API_KEY,
+            "secret": ALPACA_API_SECRET,
+        }))
+
+        authenticated = False
+        while not authenticated:
+            response = json.loads(await ws.recv())
+            messages = response if isinstance(response, list) else [response]
+            for message in messages:
+                if message.get("T") == "error":
+                    raise RuntimeError(f"Alpaca news stream error: {message}")
+                if message.get("T") == "success" and message.get("msg") == "authenticated":
+                    authenticated = True
+
+        await ws.send(json.dumps({"action": "subscribe", "news": ["*"]}))
+
+        async for raw_message in ws:
+            events = json.loads(raw_message)
+            if not isinstance(events, list):
+                events = [events]
+            for event in events:
+                if event.get("T") == "error":
+                    raise RuntimeError(f"Alpaca news stream error: {event}")
+                if event.get("T") == "n":
+                    yield ingest_from_alpaca(event)
+
+def retrieve_historical_news(start_date: datetime, end_date: datetime, limit: int) -> List[NewsArticle]:
     fields = {
         "start": start_date.isoformat(),
         "end": end_date.isoformat(),
@@ -106,5 +141,9 @@ def retrive_historical_news(start_date: datetime, end_date: datetime, limit: int
         "APCA-API-KEY-ID": ALPACA_API_KEY,
         "APCA-API-SECRET-KEY": ALPACA_API_SECRET
     })
+        
+    if response.status_code != 200:
+        raise Exception(f"Failed to retrieve news articles: {response.status_code} - {response.text}")
     
-    return [ingest_from_alpaca(article) for article in response.json()]
+    return [ingest_from_alpaca(article) for article in response.json()["news"]]
+    
