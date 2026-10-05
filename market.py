@@ -6,6 +6,7 @@ import math
 import os
 
 import dotenv
+from alpaca.common.exceptions import APIError
 from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.enums import DataFeed
 from alpaca.data.requests import (
@@ -15,7 +16,6 @@ from alpaca.data.requests import (
 from alpaca.data.timeframe import TimeFrame
 
 from news import NewsArticle
-from session import Session, SessionType
 
 
 dotenv.load_dotenv()
@@ -87,6 +87,20 @@ class MarketContext:
         lines.append(f"└{'─' * inner_width}┘")
         return "\n".join(lines)
 
+@dataclass
+class MarketOutcome:
+    article_id: int
+    ticker: str
+
+    starting_price: float
+
+    return_1m: float | None
+    return_5m: float | None
+    return_15m: float | None
+    return_30m: float | None
+    return_60m: float | None
+
+    measured_from: datetime
 
 def _utc(timestamp: datetime) -> datetime:
     if timestamp.tzinfo is None:
@@ -224,16 +238,21 @@ def create_from_article(article: NewsArticle, current_time: datetime) -> list[Ma
         spy_return_5m = None
 
     for ticker in dict.fromkeys(article.symbols):
-
-        price_at_news = get_price_at(
-            ticker,
-            published_at
-        )
-        signal_bars = get_minute_bars(
-            ticker,
-            captured_at - timedelta(minutes=40),
-            captured_at
-        )
+        try:
+            price_at_news = get_price_at(
+                ticker,
+                published_at
+            )
+            signal_bars = get_minute_bars(
+                ticker,
+                captured_at - timedelta(minutes=40),
+                captured_at
+            )
+        except APIError as exc:
+            if "invalid symbol" not in str(exc).lower():
+                raise
+            print(f"Skipping market data for unsupported Alpaca symbol {ticker}: {exc}")
+            continue
 
         (price_at_signal,
          return_1m,
@@ -261,3 +280,103 @@ def create_from_article(article: NewsArticle, current_time: datetime) -> list[Ma
         contexts.append(context)
 
     return contexts
+
+def create_outcome(
+    article_id: int,
+    ticker: str,
+    current_time: datetime,
+) -> MarketOutcome:
+    #only used for historical evaluation
+
+    current_time = _utc(current_time)
+
+    # calculates every outcome in one request
+    bars = get_minute_bars(
+        ticker,
+        current_time - timedelta(minutes=2),
+        current_time + timedelta(minutes=61),
+    )
+
+    starting_bars = [
+        bar
+        for bar in bars
+        if _utc(bar.timestamp) <= current_time
+    ]
+
+    if starting_bars:
+        starting_price = float(
+            starting_bars[-1].close
+        )
+    else:
+        starting_price = math.nan
+
+    def future_price_at(
+        minutes: int,
+    ) -> float | None:
+
+        target = (
+            current_time
+            + timedelta(minutes=minutes)
+        )
+
+        for bar in bars:
+
+            bar_time = _utc(
+                bar.timestamp
+            )
+
+            if bar_time >= target:
+
+                difference = (
+                    bar_time - target
+                )
+
+                if difference > timedelta(minutes=1):
+                    return None
+
+                return float(
+                    bar.close
+                )
+
+        return None
+
+    def future_return(
+        minutes: int,
+    ) -> float | None:
+
+        if not math.isfinite(
+            starting_price
+        ):
+            return None
+
+        future_price = future_price_at(
+            minutes
+        )
+
+        if future_price is None:
+            return None
+
+        result = _pct_return(
+            future_price,
+            starting_price,
+        )
+
+        if not math.isfinite(result):
+            return None
+
+        return result
+
+    return MarketOutcome(
+        article_id=article_id,
+        ticker=ticker,
+
+        starting_price=starting_price,
+
+        return_1m=future_return(1),
+        return_5m=future_return(5),
+        return_15m=future_return(15),
+        return_30m=future_return(30),
+        return_60m=future_return(60),
+
+        measured_from=current_time,
+    )
