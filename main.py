@@ -33,8 +33,9 @@ dotenv.load_dotenv()
 
 import news
 from news import NewsArticle, NewsSignal
-
 import agent
+import bouncer
+
 print("Initializing...")
 router = Router(preload=True, token = os.getenv('HF_TOKEN'))
 print("Router initialized.")
@@ -57,112 +58,6 @@ def process_article(router, article):
         (signal, contexts.get(signal.ticker))
         for signal in signals
     ]
-
-def calculate_signal_quality(
-    signal: NewsSignal,
-    context: MarketContext
-) -> float:
-    """
-    Returns signal quality from 0.0 to 1.0.
-
-    Quality measures how strong/actionable the news signal appears.
-    It does NOT determine bullish vs bearish direction.
-    """
-
-    # -------------------------
-    # News quality
-    # -------------------------
-
-    news_quality = (
-        0.30 * abs(signal.direction)
-        + 0.25 * signal.materiality
-        + 0.20 * signal.novelty
-        + 0.10 * signal.market_relevance
-        + 0.10 * signal.company_relevance
-        + 0.05 * signal.certainty
-    )
-
-    # Penalize information Laya believes was already known
-    news_quality *= (1.0 - signal.already_known)
-
-
-    # -------------------------
-    # Has the market already moved?
-    # -------------------------
-
-    move = abs(context.return_since_news)
-
-    if move < 0.0025:        # < 0.25%
-        freshness = 1.00
-
-    elif move < 0.005:       # 0.25% - 0.50%
-        freshness = 0.90
-
-    elif move < 0.010:       # 0.50% - 1.00%
-        freshness = 0.70
-
-    elif move < 0.020:       # 1% - 2%
-        freshness = 0.40
-
-    else:                    # > 2%
-        freshness = 0.15
-
-
-    # -------------------------
-    # Relative volume
-    # -------------------------
-
-    rv = context.relative_volume
-
-    if rv >= 2.0:
-        volume_quality = 1.00
-
-    elif rv >= 1.5:
-        volume_quality = 0.90
-
-    elif rv >= 1.0:
-        volume_quality = 0.75
-
-    elif rv >= 0.5:
-        volume_quality = 0.50
-
-    else:
-        volume_quality = 0.25
-
-
-    # -------------------------
-    # Is recent movement aligned
-    # with the news direction?
-    # -------------------------
-
-    direction = signal.direction
-
-    if context.return_5m is None or not math.isfinite(context.return_5m):
-        alignment = 0.50
-
-    elif direction * context.return_5m > 0:
-        alignment = 1.00
-
-    elif abs(context.return_5m) < 0.001:
-        alignment = 0.70
-
-    else:
-        alignment = 0.30
-
-
-    # -------------------------
-    # Combine everything
-    # -------------------------
-
-    quality = (
-        0.65 * news_quality
-        + 0.15 * freshness
-        + 0.10 * volume_quality
-        + 0.10 * alignment
-    )
-
-    return max(0.0, min(1.0, quality))
-
 
 def _finite_or_none(value):
     try:
@@ -299,12 +194,15 @@ async def track_outcomes(signal: NewsSignal, context: MarketContext, quality: fl
 
 
 async def run_news_stream():
+
     print("Connecting to Alpaca news stream...")
+
     async for article in news.stream_news():
         print(f"\nNews: {article.headline} ({', '.join(article.symbols)})")
+
         for signal, context in process_article(router, article):
             if context is not None:
-                quality = calculate_signal_quality(signal, context)
+                quality = bouncer.score(signal, context)
                 initial = _signal_event(signal, context, quality)
                 initial["headline"] = article.headline
                 initial["published_at"] = article.published_at.isoformat()
