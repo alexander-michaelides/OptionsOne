@@ -1,3 +1,5 @@
+# handles news signal data populating
+
 import laya
 
 from news import NewsArticle, NewsSignal

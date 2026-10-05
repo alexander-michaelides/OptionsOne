@@ -1,3 +1,5 @@
+# handles news streaming and processing
+
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import json

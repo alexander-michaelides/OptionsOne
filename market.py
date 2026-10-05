@@ -1,3 +1,5 @@
+# handles all aspects of market data, price, returns, etc
+
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 import math
