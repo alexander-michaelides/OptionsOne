@@ -1,0 +1,5 @@
+[
+  {"T": "subscription", "news": ["*"]},
+  {"T": "n", "id": 8142, "headline": "Intraday bulletin", "summary": "", "content": "", "source": "benzinga", "symbols": ["AAPL"], "created_at": "2025-07-03T15:00:00Z", "updated_at": "2025-07-03T15:00:04Z"},
+  {"T": "n", "id": 8143, "headline": "Second intraday bulletin", "summary": "", "content": "", "source": "benzinga", "symbols": ["MSFT"], "created_at": "2025-07-03T15:00:01Z", "updated_at": "2025-07-03T15:00:02Z"}
+]
