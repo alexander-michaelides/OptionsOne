@@ -15,7 +15,9 @@ from optionsone.core.types import (
     TimeHorizon,
 )
 
-type Score = Annotated[int, Field(strict=True, ge=0, le=4)]
+# 0-4 scale. Laya returns an expected value (e.g. 1.5932); hosted models and the stub return
+# whole levels. Both map to [0, 1] as score / 4, as the legacy pipeline did.
+type Score = Annotated[FiniteFloat, Field(strict=True, ge=0, le=4)]
 type Noul = Annotated[float, Field(strict=True, ge=0, le=1)]
 type Weight = Annotated[FiniteFloat, Field(strict=True, ge=0)]
 

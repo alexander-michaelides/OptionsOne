@@ -44,3 +44,31 @@ async def test_laya_predicts_off_thread_with_ticker_and_maps_legacy_answers(
     assert result.direction == pytest.approx(-0.75)
     assert (result.materiality, result.novelty, result.certainty) == (0.5, 0.75, 1.0)
     assert result.knowledge_time == article.knowledge_time + latency
+
+
+async def test_laya_expected_value_scores_map_continuously(article: Article) -> None:
+    # Real laya 0.4.37 returns scores as expected values on the 0-4 scale, not whole levels.
+    class RealShapeRouter:
+        def predict(self, state: dict[str, str], questions: Mapping[str, object], /) -> object:
+            return {
+                "answers": {
+                    "event_type": {"choice": "earnings"},
+                    "direction": {
+                        "probabilities": {"positive": 0.62, "neutral": 0.3, "negative": 0.08}
+                    },
+                    "materiality": {"score": 1.5932},
+                    "novelty": {"score": 2.3575},
+                    "certainty": {"score": 3.4744},
+                    "company_relevance": {"noul": 0.91},
+                    "market_relevance": {"noul": 0.84},
+                    "already_known": {"noul": 0.12},
+                    "time_horizon": {"choice": "short"},
+                    "effect_type": {"choice": "revenue"},
+                }
+            }
+
+    result = await LayaClassifier(RealShapeRouter(), latency=timedelta(0)).classify(article, "AAA")
+    assert (result.materiality, result.novelty, result.certainty) == pytest.approx(
+        (1.5932 / 4, 2.3575 / 4, 3.4744 / 4)
+    )
+    assert result.direction == pytest.approx(0.54)
