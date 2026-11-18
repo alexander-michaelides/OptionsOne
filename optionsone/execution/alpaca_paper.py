@@ -6,7 +6,7 @@ from urllib.parse import quote
 
 import httpx
 from anyio import Lock
-from pydantic import BaseModel, SecretStr, TypeAdapter
+from pydantic import AliasChoices, AwareDatetime, BaseModel, Field, SecretStr, TypeAdapter
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from optionsone.core.clock import Clock, LiveClock
@@ -23,6 +23,15 @@ class LiveTradingForbidden(ValueError):
         super().__init__(f"only the Alpaca paper trading URL is allowed, got {url!r}")
 
 
+class LiveKeyForbidden(LiveTradingForbidden):
+    """Alpaca live-account keys start with 'AK'; paper keys start with 'PK'."""
+
+    def __init__(self) -> None:
+        ValueError.__init__(
+            self, "refusing an Alpaca live-account key (AK...); use a paper key (PK...)"
+        )
+
+
 class MissingPaperCredentials(ValueError):
     """The paper account key and secret must both be configured."""
 
@@ -34,11 +43,52 @@ class PaperCancellationError(RuntimeError):
 
 
 class AlpacaPaperSettings(BaseSettings):
-    model_config = SettingsConfigDict(env_prefix="ALPACA_PAPER_", frozen=True)
+    """Paper credentials from the environment or ./.env.
 
-    base_url: str = PAPER_BASE_URL
-    api_key: SecretStr = SecretStr("")
-    secret_key: SecretStr = SecretStr("")
+    ALPACA_PAPER_* wins; ALPACA_API_KEY / ALPACA_SECRET_KEY are accepted when they are paper keys.
+    """
+
+    model_config = SettingsConfigDict(
+        env_file=".env", extra="ignore", frozen=True, populate_by_name=True
+    )
+
+    base_url: str = Field(
+        default=PAPER_BASE_URL, validation_alias=AliasChoices("ALPACA_PAPER_BASE_URL", "base_url")
+    )
+    api_key: SecretStr = Field(
+        default=SecretStr(""),
+        validation_alias=AliasChoices("ALPACA_PAPER_API_KEY", "ALPACA_API_KEY", "api_key"),
+    )
+    secret_key: SecretStr = Field(
+        default=SecretStr(""),
+        validation_alias=AliasChoices("ALPACA_PAPER_SECRET_KEY", "ALPACA_SECRET_KEY", "secret_key"),
+    )
+
+
+class AccountSummary(BaseModel):
+    status: str
+    currency: str
+    equity: float
+    buying_power: float
+    trading_blocked: bool
+
+
+class MarketClock(BaseModel):
+    """Alpaca reports clock times with an America/New_York offset."""
+
+    is_open: bool
+    timestamp: AwareDatetime
+    next_open: AwareDatetime
+    next_close: AwareDatetime
+
+
+class OrderStatus(BaseModel):
+    id: str
+    client_order_id: str
+    symbol: str
+    status: str
+    type: str
+    limit_price: float | None = None
 
 
 class _RemoteOrder(BaseModel):
@@ -62,11 +112,6 @@ class _Activity(BaseModel):
     transaction_time: UtcDatetime
 
 
-class _Cancellation(BaseModel):
-    id: str
-    status: int
-
-
 class AlpacaPaperBroker(Broker):
     """Reconcile before submitting and return incremental account fill activities."""
 
@@ -82,6 +127,8 @@ class AlpacaPaperBroker(Broker):
         self._settings = settings if settings is not None else AlpacaPaperSettings()
         if self._settings.base_url != PAPER_BASE_URL:
             raise LiveTradingForbidden(self._settings.base_url)
+        if self._settings.api_key.get_secret_value().upper().startswith("AK"):
+            raise LiveKeyForbidden()
         self._clock = clock if clock is not None else LiveClock()
         self._lock = Lock()
         self._started_after: str | None = None
@@ -206,11 +253,64 @@ class AlpacaPaperBroker(Broker):
                 return await self._reconcile(client)
             return await self._positions(client)
 
-    async def cancel_all(self) -> None:
+    async def account(self) -> AccountSummary:
+        async with self._client() as client:
+            response = (await client.get("/v2/account")).raise_for_status()
+            return AccountSummary.model_validate_json(response.content)
+
+    async def market_clock(self) -> MarketClock:
+        async with self._client() as client:
+            response = (await client.get("/v2/clock")).raise_for_status()
+            return MarketClock.model_validate_json(response.content)
+
+    async def submit_limit(
+        self, symbol: str, side: OrderSide, qty: int, limit_price: float, client_order_id: str
+    ) -> OrderStatus:
+        """Day limit order; used by the paper smoke test, not by the strategy."""
         async with self._lock, self._client() as client:
-            response = (await client.delete(_ORDERS)).raise_for_status()
-            if response.status_code == 207:
-                results = TypeAdapter(list[_Cancellation]).validate_json(response.content)
-                failures = tuple(item.id for item in results if not 200 <= item.status < 300)
-                if failures:
-                    raise PaperCancellationError(failures)
+            response = await client.post(
+                _ORDERS,
+                json={
+                    "client_order_id": client_order_id,
+                    "symbol": symbol,
+                    "side": side.value,
+                    "qty": str(qty),
+                    "type": "limit",
+                    "limit_price": f"{limit_price:.2f}",
+                    "time_in_force": "day",
+                },
+            )
+            order = OrderStatus.model_validate_json(response.raise_for_status().content)
+            self._known[order.client_order_id] = order.id
+            return order
+
+    async def order(self, order_id: str) -> OrderStatus:
+        async with self._client() as client:
+            path = f"{_ORDERS}/{quote(order_id, safe='')}"
+            response = (await client.get(path)).raise_for_status()
+            return OrderStatus.model_validate_json(response.content)
+
+    async def cancel_order(self, order_id: str) -> None:
+        async with self._lock, self._client() as client:
+            (await client.delete(f"{_ORDERS}/{quote(order_id, safe='')}")).raise_for_status()
+
+    async def cancel(self, client_order_ids: Sequence[str]) -> None:
+        """Cancel only orders this process submitted; never DELETE /v2/orders (account-wide)."""
+        failures: list[str] = []
+        async with self._lock, self._client() as client:
+            for client_order_id in client_order_ids:
+                remote = self._known.get(client_order_id)
+                if remote is None:
+                    found = await client.get(
+                        "/v2/orders:by_client_order_id",
+                        params={"client_order_id": client_order_id},
+                    )
+                    if found.status_code == 404:
+                        continue
+                    remote = _RemoteOrder.model_validate_json(found.raise_for_status().content).id
+                response = await client.delete(f"{_ORDERS}/{quote(remote, safe='')}")
+                # 422: no longer cancelable (already filled or canceled) is a settled state.
+                if not (response.is_success or response.status_code in (404, 422)):
+                    failures.append(client_order_id)
+        if failures:
+            raise PaperCancellationError(tuple(failures))

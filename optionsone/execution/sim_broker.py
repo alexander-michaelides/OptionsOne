@@ -104,8 +104,9 @@ class SimBroker(Broker):
     async def positions(self) -> Sequence[Position]:
         return tuple(self._positions.values())
 
-    async def cancel_all(self) -> None:
-        self._pending.clear()
+    async def cancel(self, client_order_ids: Sequence[str]) -> None:
+        for client_order_id in client_order_ids:
+            self._pending.pop(client_order_id, None)
 
 
 class NegativeLatencyError(ValueError):

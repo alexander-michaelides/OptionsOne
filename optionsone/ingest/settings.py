@@ -7,7 +7,9 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class AlpacaSettings(BaseSettings):
     """Load credentials from the environment when an adapter is constructed."""
 
-    model_config = SettingsConfigDict(env_prefix="ALPACA_", frozen=True)
+    model_config = SettingsConfigDict(
+        env_prefix="ALPACA_", env_file=".env", extra="ignore", frozen=True
+    )
 
     api_key: SecretStr
     secret_key: SecretStr

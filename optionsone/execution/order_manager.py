@@ -124,7 +124,9 @@ class OrderManager:
             if deadline <= now and not self.has_working_order(symbol)
         )
 
-    async def cancel_all(self) -> None:
-        """Release reservations after broker-side cancellation."""
-        await self._broker.cancel_all()
+    async def cancel_working(self) -> None:
+        """Cancel this manager's working orders only, then release their reservations."""
+        ids = [working.order.client_order_id for working in self._working.values()]
+        if ids:
+            await self._broker.cancel(ids)
         self._working.clear()

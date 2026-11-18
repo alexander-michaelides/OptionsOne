@@ -127,7 +127,7 @@ async def run_backtest[Payload](
             was_latched = kill_switch.flatten_requested
             kill_switch.observe(session, portfolio.equity)
             if kill_switch.flatten_requested and not was_latched:
-                await manager.cancel_all()
+                await manager.cancel_working()
         halted = kill_switch is not None and kill_switch.flatten_requested
         if halted or flattening:
             due = tuple(

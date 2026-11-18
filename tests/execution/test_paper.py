@@ -1,5 +1,6 @@
 import json
 from datetime import UTC, datetime
+from pathlib import Path
 
 import httpx
 import pytest
@@ -112,19 +113,19 @@ async def test_paper_fills_deliver_partials_once_and_cancels_at_paper_host(
                 }
             ]
         )
-        canceled = mock.delete(ORDERS).respond(
-            json=[{"id": "remote-id", "status": 200}], status_code=207
-        )
+        account_wide = mock.delete(ORDERS).respond(status_code=207, json=[])
+        canceled = mock.delete(f"{ORDERS}/remote-id").respond(status_code=204)
 
         fills = await broker.fills()
         followup = await broker.fills()
-        await broker.cancel_all()
+        await broker.cancel(["signal-id"])
 
         assert [(fill.client_order_id, fill.qty, fill.price) for fill in fills] == [
             ("signal-id", 3, 100.125)
         ]
         assert not followup
         assert canceled.call_count == 1
+        assert account_wide.call_count == 0  # never cancels foreign orders
 
 
 async def test_paper_credentials_are_never_forwarded_to_redirect(
@@ -138,3 +139,23 @@ async def test_paper_credentials_are_never_forwarded_to_redirect(
             await broker.reconcile()
 
         assert redirected.call_count == 0
+
+
+def test_live_account_key_is_refused() -> None:
+    from optionsone.execution.alpaca_paper import LiveKeyForbidden
+
+    settings = AlpacaPaperSettings(api_key=SecretStr("AKLIVE123"), secret_key=SecretStr("s"))
+    with pytest.raises(LiveKeyForbidden):
+        AlpacaPaperBroker(settings=settings)
+
+
+def test_generic_alpaca_env_names_are_accepted(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.chdir(tmp_path)  # no .env here
+    monkeypatch.delenv("ALPACA_PAPER_API_KEY", raising=False)
+    monkeypatch.delenv("ALPACA_PAPER_SECRET_KEY", raising=False)
+    monkeypatch.setenv("ALPACA_API_KEY", "PKTEST")
+    monkeypatch.setenv("ALPACA_SECRET_KEY", "secret")
+    settings = AlpacaPaperSettings()
+    assert settings.api_key.get_secret_value() == "PKTEST"
