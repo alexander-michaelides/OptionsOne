@@ -15,7 +15,7 @@ from optionsone.core.types import Article, Bar, Classification, FeatureVector
 from optionsone.features.pipeline import build_features
 from optionsone.ingest.calendar import is_regular_session
 from optionsone.research.evaluate import EvaluationReport, EventKey, Outcome, evaluate
-from optionsone.research.labels import forward_returns
+from optionsone.research.labels import BarIndex, forward_returns
 from optionsone.research.registry import TrialRegistry
 from optionsone.signals.model import LinearSignalModel
 
@@ -60,12 +60,13 @@ def build_dataset(classifications: Sequence[Classification], bars: Sequence[Bar]
     pit = PointInTimeBars(bars, clock)
     features: list[FeatureVector] = []
     labels: dict[EventKey, Outcome] = {}
+    index = BarIndex(bars)  # built once: per-event label lookups are binary searches
     for classification in ordered:
         clock.advance_to(classification.knowledge_time)
         fv = build_features(classification, pit)
         if fv is None:
             continue
-        label = forward_returns(fv.as_of, fv.ticker, bars).get(HORIZON_MINUTES)
+        label = forward_returns(fv.as_of, fv.ticker, index).get(HORIZON_MINUTES)
         if label is None:
             continue
         features.append(fv)

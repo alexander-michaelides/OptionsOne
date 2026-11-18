@@ -1,5 +1,6 @@
 """Forward outcomes from full research bars. Never use these as decision inputs."""
 
+from bisect import bisect_left, bisect_right
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -37,6 +38,28 @@ class BarrierSpec:
     lower_mult: float = 1.5
 
 
+class BarIndex:
+    """Bars keyed by symbol and start, built once so each label lookup is a binary search.
+
+    Later duplicates of the same (symbol, start) win, matching a plain dict build.
+    """
+
+    def __init__(self, bars: Iterable[Bar]) -> None:
+        self._by_start: dict[str, dict[datetime, Bar]] = {}
+        for bar in bars:
+            self._by_start.setdefault(bar.symbol, {})[bar.start] = bar
+        self._starts = {symbol: sorted(series) for symbol, series in self._by_start.items()}
+
+    def series(self, symbol: str) -> dict[datetime, Bar]:
+        return self._by_start.get(symbol, {})
+
+    def first_open_after(self, symbol: str, decision: datetime, ready: datetime) -> Bar | None:
+        """First bar starting strictly after `decision` and no earlier than `ready`."""
+        starts = self._starts.get(symbol, [])
+        i = max(bisect_right(starts, decision), bisect_left(starts, ready))
+        return self._by_start[symbol][starts[i]] if i < len(starts) else None
+
+
 def _entry(stock: Iterable[Bar], decision: datetime, latency: timedelta) -> Bar | None:
     if latency < timedelta(0):
         raise ValueError("entry latency must be nonnegative")
@@ -51,7 +74,7 @@ def _entry(stock: Iterable[Bar], decision: datetime, latency: timedelta) -> Bar 
 def forward_returns(
     decision_time: datetime,
     symbol: str,
-    bars: Sequence[Bar],
+    bars: Sequence[Bar] | BarIndex,
     *,
     entry_latency: timedelta = timedelta(0),
     horizons: Sequence[int] = HORIZONS,
@@ -65,11 +88,14 @@ def forward_returns(
     """
     if any(h <= 0 for h in horizons):
         raise ValueError("horizons must be positive minutes")
-    stock = {bar.start: bar for bar in bars if bar.symbol == symbol}
-    entry = _entry(stock.values(), decision_time, entry_latency)
+    if entry_latency < timedelta(0):
+        raise ValueError("entry latency must be nonnegative")
+    index = bars if isinstance(bars, BarIndex) else BarIndex(bars)
+    stock = index.series(symbol)
+    entry = index.first_open_after(symbol, decision_time, decision_time + entry_latency)
     if entry is None:
         return {}
-    market = {bar.start: bar for bar in bars if bar.symbol == benchmark}
+    market = index.series(benchmark)
     market_entry = market.get(entry.start)
     labels: dict[int, ForwardLabel] = {}
     for horizon in horizons:
