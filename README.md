@@ -46,7 +46,9 @@ Market data is the free IEX feed. Everything writes under `data/` (gitignored).
 uv run optionsone paper-check        # account ACTIVE, market clock, positions, IEX bars reachable
 uv run optionsone paper-smoke        # 1-share SPY limit at 50% of last price -> verify open -> cancel
 
-# 1. Backfill a research window (news + 1-minute bars for the universe and SPY). Idempotent.
+# 1. Backfill a research window (news + 1-minute bars for the universe and SPY). Prints one line per
+#    day and writes each day before fetching the next, so Ctrl-C or a crash loses at most one day; re-running
+#    the same command skips completed days (data/store/_backfill_done.jsonl). Writes are deduplicated.
 uv run optionsone backfill --start 2026-08-03 --end 2026-11-14 --symbols AAPL,NVDA,TSLA,AMD,MSFT
 
 # 2. Research: classify (cached), PIT features, purged walk-forward CV, fit + save the model.

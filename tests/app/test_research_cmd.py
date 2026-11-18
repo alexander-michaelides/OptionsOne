@@ -10,9 +10,16 @@ from pydantic import JsonValue, TypeAdapter
 
 from optionsone.app.fixtures import synthetic_fixture
 from optionsone.app.offline import run_offline
-from optionsone.app.research_cmd import EmptyStoreError, backfill, backtest_store, research
+from optionsone.app.research_cmd import (
+    DayProgress,
+    EmptyStoreError,
+    backfill,
+    backtest_store,
+    research,
+)
 from optionsone.classify.cache import CachedClassifier
 from optionsone.classify.stub import DeterministicStubClassifier
+from optionsone.core.clock import SimClock
 from optionsone.core.types import Article, Bar, Classification
 from optionsone.ingest.store import ParquetStore
 from optionsone.ingest.validate import BarTimestamp
@@ -192,3 +199,72 @@ async def test_small_account_skips_are_reported_not_silent(tmp_path: Path) -> No
     assert not run.backtest.report.trades
     assert skipped["size_below_one_share"] > 0
     assert sum(skipped.values()) == run.backtest.signals
+
+
+class FlakyNews:
+    """Serves the fixture but fails on one day, like a dropped connection mid-run."""
+
+    def __init__(self, articles: Sequence[Article], fail_day: datetime | None) -> None:
+        self.articles, self.fail_day, self.calls = articles, fail_day, 0
+
+    async def fetch(self, start: datetime, end: datetime) -> Sequence[Article]:
+        self.calls += 1
+        if self.fail_day is not None and start <= self.fail_day < end:
+            raise ConnectionError("simulated network drop")
+        return [a for a in self.articles if start <= a.published_at < end]
+
+
+async def test_interrupted_backfill_resumes_from_the_failed_day(tmp_path: Path) -> None:
+    data = synthetic_fixture(days=4)
+    start = data.bars[0].start.replace(hour=0, minute=0)
+    end = data.bars[-1].start.replace(hour=0, minute=0) + timedelta(days=1)
+    third_day = sorted({b.start.date() for b in data.bars})[2]
+    fail_at = datetime.combine(third_day, datetime.min.time(), tzinfo=start.tzinfo)
+    bars = FakeBars(data.bars)
+
+    with pytest.raises(ConnectionError):
+        await backfill(tmp_path, (), start, end, news=FlakyNews(data.articles, fail_at), bars=bars)
+
+    days: list[DayProgress] = []
+    news = FlakyNews(data.articles, None)
+    report = await backfill(tmp_path, (), start, end, news=news, bars=bars, on_day=days.append)
+    resumed = [d.day for d in days if d.resumed]
+    assert resumed  # completed days were skipped
+    assert max(resumed) < third_day
+    assert news.calls == len(days) - len(resumed)  # only unfinished days were fetched
+    stored = ParquetStore(tmp_path).load_bars(sorted({b.symbol for b in data.bars}), start, end)
+    assert len(stored) == len(data.bars)  # nothing lost, nothing duplicated
+    assert report.bars_added == len(data.bars) - sum(
+        1 for b in data.bars if b.start.date() < third_day
+    )
+
+
+async def test_open_window_is_not_marked_done_and_universes_are_separate(tmp_path: Path) -> None:
+    data = synthetic_fixture(days=2)
+    start = data.bars[0].start.replace(hour=0, minute=0)
+    end = start + timedelta(days=1)
+    bars = FakeBars(data.bars)
+    during_day = SimClock(start + timedelta(hours=15))
+    days: list[DayProgress] = []
+    await backfill(
+        tmp_path,
+        (),
+        start,
+        end,
+        news=FakeNews(data.articles),
+        bars=bars,
+        clock=during_day,
+        on_day=days.append,
+    )
+    await backfill(
+        tmp_path, (), start, end, news=FakeNews(data.articles), bars=bars, on_day=days.append
+    )
+    assert [d.resumed for d in days] == [False, False]  # still-open day was refetched
+
+    await backfill(
+        tmp_path, ("AAA",), start, end, news=FakeNews(data.articles), bars=bars, on_day=days.append
+    )
+    await backfill(
+        tmp_path, (), start, end, news=FakeNews(data.articles), bars=bars, on_day=days.append
+    )
+    assert [d.resumed for d in days[2:]] == [False, True]

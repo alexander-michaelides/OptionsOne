@@ -19,7 +19,13 @@ from optionsone.app.paper_cmd import (
     paper_smoke,
     run_paper,
 )
-from optionsone.app.research_cmd import EmptyStoreError, backfill, backtest_store, research
+from optionsone.app.research_cmd import (
+    DayProgress,
+    EmptyStoreError,
+    backfill,
+    backtest_store,
+    research,
+)
 from optionsone.classify.stub import DeterministicStubClassifier
 from optionsone.core.clock import LiveClock
 from optionsone.execution.alpaca_paper import AlpacaPaperBroker
@@ -54,6 +60,15 @@ def _utc(day: str) -> datetime:
     return datetime.fromisoformat(day).replace(tzinfo=UTC)
 
 
+def _echo_day(progress: DayProgress) -> None:
+    if progress.resumed:
+        typer.echo(f"{progress.day}  already done, skipped")
+    else:
+        typer.echo(
+            f"{progress.day}  articles +{progress.articles_added:<6} bars +{progress.bars_added}"
+        )
+
+
 @app.command("backfill")
 def backfill_cmd(
     start: Annotated[str, typer.Option(help="UTC start date, e.g. 2026-08-01")],
@@ -72,6 +87,7 @@ def backfill_cmd(
             _utc(end),
             news=AlpacaHistoricalNews(),
             bars=bar_source,
+            on_day=_echo_day,
         )
     )
     typer.echo(f"articles fetched/added  {report.articles_fetched}/{report.articles_added}")
