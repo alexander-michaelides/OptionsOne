@@ -108,9 +108,14 @@ async def run_offline(
     *,
     train_fraction: float = 0.5,
     n_splits: int = 4,
+    initial_cash: float = 100_000.0,
 ) -> OfflineRun:
     """Research on the first part of the timeline, then replay the rest out of sample."""
+    if not 0 < train_fraction < 1:
+        raise ValueError("train_fraction must be strictly between 0 and 1")
     classifications = await classify_articles(articles, classifier)
+    if len(classifications) < 2:
+        raise ValueError(f"need at least 2 classified events, got {len(classifications)}")
     ordered = sorted(classifications, key=lambda c: (c.knowledge_time, c.article_id))
     cut = ordered[int(len(ordered) * train_fraction)].knowledge_time
     # Purge: a training sample is usable only if its label was fully realised before replay.
@@ -119,5 +124,5 @@ async def run_offline(
     test_events = [c for c in ordered if c.knowledge_time >= cut]
     test_bars = [b for b in bars if b.end > cut - _WARMUP]
     strategy = NewsStrategy(test_events, model, is_regular_session)
-    result = await run_backtest(strategy, test_bars)
+    result = await run_backtest(strategy, test_bars, initial_cash=initial_cash)
     return OfflineRun(len(classifications), report, model.model_id, cut, result)

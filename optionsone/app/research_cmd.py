@@ -11,13 +11,15 @@ from anyio import Path as AsyncPath
 from anyio.to_thread import run_sync
 
 from optionsone.app.offline import (
+    OfflineRun,
     build_dataset,
     classify_articles,
     evaluate_and_fit,
     purge_dataset,
+    run_offline,
 )
 from optionsone.core.ports import Classifier, HistoricalBars, HistoricalNews
-from optionsone.core.types import Bar
+from optionsone.core.types import Article, Bar
 from optionsone.ingest.calendar import session_close, session_open
 from optionsone.ingest.store import ParquetStore
 from optionsone.ingest.validate import BarQualityReport, validate_bars
@@ -95,6 +97,61 @@ async def backfill(
     )
 
 
+class EmptyStoreError(ValueError):
+    """No stored news matched the requested window and universe."""
+
+
+async def load_store(
+    store_root: Path, start: datetime, end: datetime, symbols: Sequence[str] = ()
+) -> tuple[list[Article], list[Bar]]:
+    """Stored news in [start, end), optionally narrowed to a universe, plus bars it needs."""
+    store = ParquetStore(store_root)
+    articles = await run_sync(store.load_articles, start, end)
+    universe = {symbol.upper() for symbol in symbols}
+    if universe:
+        articles = [
+            article.model_copy(
+                update={"symbols": tuple(s for s in article.symbols if s in universe)}
+            )
+            for article in articles
+            if not universe.isdisjoint(article.symbols)
+        ]
+    needed = sorted({symbol for article in articles for symbol in article.symbols} | {_BENCHMARK})
+    bars = await run_sync(store.load_bars, needed, start, end)
+    return articles, bars
+
+
+async def backtest_store(
+    store_root: Path,
+    start: datetime,
+    end: datetime,
+    classifier: Classifier,
+    *,
+    registry_path: Path,
+    symbols: Sequence[str] = (),
+    train_fraction: float = 0.5,
+    n_splits: int = 4,
+    initial_cash: float = 100_000.0,
+) -> OfflineRun:
+    """Fit on the earlier part of the stored window, replay the rest through the engine."""
+    articles, bars = await load_store(store_root, start, end, symbols)
+    if not articles:
+        raise EmptyStoreError(
+            f"no stored news in [{start:%Y-%m-%d}, {end:%Y-%m-%d}) for this universe; "
+            "run backfill first"
+        )
+    await AsyncPath(registry_path.parent).mkdir(parents=True, exist_ok=True)
+    return await run_offline(
+        articles,
+        bars,
+        classifier,
+        registry_path,
+        train_fraction=train_fraction,
+        n_splits=n_splits,
+        initial_cash=initial_cash,
+    )
+
+
 async def research(
     store_root: Path,
     start: datetime,
@@ -107,10 +164,7 @@ async def research(
     n_splits: int = 5,
 ) -> ResearchReport:
     """Evaluate stored data and export a model fitted using outcomes known before end."""
-    store = ParquetStore(store_root)
-    articles = await run_sync(store.load_articles, start, end)
-    symbols = sorted({symbol for article in articles for symbol in article.symbols} | {_BENCHMARK})
-    bars = await run_sync(store.load_bars, symbols, start, end)
+    articles, bars = await load_store(store_root, start, end)
     classifications = await classify_articles(articles, classifier)
     dataset = purge_dataset(await run_sync(build_dataset, classifications, bars), end)
 

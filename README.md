@@ -54,6 +54,11 @@ uv run optionsone backfill --start 2026-08-03 --end 2026-11-14 --symbols AAPL,NV
 uv run optionsone research --start 2026-08-03 --end 2026-11-14 --classifier laya
 #    -> data/models/model.json and model.report.json (promotion_gate PASS/FAIL)
 
+# 2b. Event-driven backtest on the stored data: fit on the first half, replay the second half through the
+#     engine (next-open fills, costs, sizing, limits, pre-close flatten). Skipped signals are listed by reason.
+uv run optionsone backtest --start 2026-08-03 --end 2026-11-14 --classifier laya --initial-cash 1000
+#     size_below_one_share means the stock costs more than one position allows (10% of equity by default).
+
 # 3. Paper trade during market hours (Ctrl-C stops gracefully; working orders are cancelled).
 uv run optionsone paper --symbols AAPL,NVDA,TSLA,AMD,MSFT --classifier laya
 #    --allow-unpromoted   trade a model that failed the gate (plumbing tests only)
@@ -99,8 +104,8 @@ and never traded, flattened or cancelled; symbols that hold one are skipped.
 - **Ownership does not survive a restart.** On startup every existing position is treated as foreign, including ones a
   previous run of the runner opened, so they are never exited automatically afterwards. Stop with `--flatten-on-stop`,
   or close leftover positions manually before restarting.
-- **`backtest` replays the synthetic fixture only.** Research on real data is the `research` command (purged walk-forward);
-  an out-of-sample event replay over the Parquet store is not wired to the CLI yet.
+- **`backtest --start/--end` is a single train/replay split**, not a rolling walk-forward of the replay. The model is fit
+  once on the first `--train-fraction` of events (purged so no training label ends after the replay starts) and held fixed.
 - **Promotion gate needs data.** It also requires at least 20 daily IC periods, because the HAC t-stat over a few days passed
   pure noise in 17.5% of 40 null simulations.
 - **No monitoring or alerting yet.** Production-readiness items (Phase 8 of the plan) are not built.

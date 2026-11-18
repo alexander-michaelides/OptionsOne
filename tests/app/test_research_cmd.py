@@ -9,7 +9,8 @@ from anyio.to_thread import run_sync
 from pydantic import JsonValue, TypeAdapter
 
 from optionsone.app.fixtures import synthetic_fixture
-from optionsone.app.research_cmd import backfill, research
+from optionsone.app.offline import run_offline
+from optionsone.app.research_cmd import EmptyStoreError, backfill, backtest_store, research
 from optionsone.classify.cache import CachedClassifier
 from optionsone.classify.stub import DeterministicStubClassifier
 from optionsone.core.types import Article, Bar, Classification
@@ -123,3 +124,71 @@ async def test_backfilled_research_exports_model_and_reuses_classifications(tmp_
     assert classifier.calls == len(data.articles)
     assert repeated.model_id == result.model_id
     assert repeated.evaluation.n_trials == 2
+
+
+async def test_store_backtest_replays_backfilled_data_like_the_in_memory_pipeline(
+    tmp_path: Path,
+) -> None:
+    data = synthetic_fixture(days=10, seed=7)
+    start, end = data.bars[0].start, data.bars[-1].end
+    store_root = tmp_path / "store"
+    await backfill(
+        store_root, (), start, end, news=FakeNews(data.articles), bars=FakeBars(data.bars)
+    )
+
+    stored = await backtest_store(
+        store_root, start, end, DeterministicStubClassifier(), registry_path=tmp_path / "a.jsonl"
+    )
+    direct = await run_offline(
+        data.articles, data.bars, DeterministicStubClassifier(), tmp_path / "b.jsonl"
+    )
+    assert stored.backtest.report.trades
+    assert stored.backtest.signals >= len(stored.backtest.report.trades)
+    assert stored.model_id == direct.model_id
+    assert stored.replay_start == direct.replay_start
+    assert stored.backtest.report.net_return == direct.backtest.report.net_return
+
+
+async def test_store_backtest_universe_narrows_events_and_empty_window_is_an_error(
+    tmp_path: Path,
+) -> None:
+    data = synthetic_fixture(days=6, seed=3)
+    start, end = data.bars[0].start, data.bars[-1].end
+    store_root = tmp_path / "store"
+    await backfill(
+        store_root, (), start, end, news=FakeNews(data.articles), bars=FakeBars(data.bars)
+    )
+    only_aaa = await backtest_store(
+        store_root,
+        start,
+        end,
+        DeterministicStubClassifier(),
+        registry_path=tmp_path / "t.jsonl",
+        symbols=("aaa",),
+    )
+    assert only_aaa.n_classifications == sum("AAA" in a.symbols for a in data.articles)
+    assert {trade.symbol for trade in only_aaa.backtest.report.trades} <= {"AAA"}
+
+    with pytest.raises(EmptyStoreError):
+        await backtest_store(
+            store_root,
+            end + timedelta(days=30),
+            end + timedelta(days=31),
+            DeterministicStubClassifier(),
+            registry_path=tmp_path / "t.jsonl",
+        )
+
+
+async def test_small_account_skips_are_reported_not_silent(tmp_path: Path) -> None:
+    data = synthetic_fixture(days=10, seed=7)  # fixture prices are about $100-160
+    run = await run_offline(
+        data.articles,
+        data.bars,
+        DeterministicStubClassifier(),
+        tmp_path / "t.jsonl",
+        initial_cash=500.0,
+    )
+    skipped = dict(run.backtest.skipped)
+    assert not run.backtest.report.trades
+    assert skipped["size_below_one_share"] > 0
+    assert sum(skipped.values()) == run.backtest.signals

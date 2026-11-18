@@ -1,6 +1,6 @@
 """Chronological replay of news events and completed minute bars."""
 
-from collections import defaultdict, deque
+from collections import Counter, defaultdict, deque
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
@@ -43,6 +43,8 @@ class BacktestResult:
     rejected_orders: tuple[RejectedOrder, ...]
     report: BacktestReport
     open_positions: tuple[Position, ...] = ()
+    signals: int = 0
+    skipped: tuple[tuple[str, int], ...] = ()  # signals not turned into orders, by reason
 
 
 async def run_backtest[Payload](
@@ -92,6 +94,8 @@ async def run_backtest[Payload](
     manager = OrderManager(broker)
     marks: dict[str, float] = {}
     orders: deque[datetime] = deque()
+    n_signals = 0
+    skipped: Counter[str] = Counter()
 
     while timeline or event is not None:
         if timeline and (event is None or timeline[0] <= event[0]):
@@ -150,19 +154,24 @@ async def run_backtest[Payload](
             for signal in signals:
                 if signal.as_of > now:
                     raise LookaheadError(f"signal as-of {signal.as_of} is after decision {now}")
+                n_signals += 1
                 deadline = signal.as_of + signal.horizon
                 if close is None or flattening or now + latency >= close or deadline <= now:
+                    skipped["outside_entry_window"] += 1
                     continue
                 if manager.has_working_order(signal.ticker) or any(
                     position.symbol == signal.ticker for position in portfolio.positions
                 ):
+                    skipped["already_in_symbol"] += 1
                     continue
                 visible = pit_bars.bars_asof(signal.ticker)
                 vol = realized_bar_vol(visible, sizing.vol_window)
                 if vol is None or visible[-1].end.astimezone(EXCHANGE_TZ).date() != session:
+                    skipped["no_same_session_history"] += 1
                     continue
                 qty = size_shares(signal, portfolio.equity, visible[-1].close, vol, sizing)
                 if not qty:
+                    skipped["size_below_one_share"] += 1
                     continue
                 order = manager.entry_order(signal, qty, now)
                 if kill_switch is not None and not kill_switch.allows(order, 0):
@@ -189,5 +198,11 @@ async def run_backtest[Payload](
 
     report = build_report(initial_cash, curve, portfolio.trades, executions)
     return BacktestResult(
-        tuple(curve), tuple(executions), tuple(rejected), report, portfolio.positions
+        tuple(curve),
+        tuple(executions),
+        tuple(rejected),
+        report,
+        portfolio.positions,
+        n_signals,
+        tuple(sorted(skipped.items())),
     )

@@ -11,7 +11,7 @@ import typer
 
 from optionsone.app.classifiers import make_classifier
 from optionsone.app.fixtures import synthetic_fixture
-from optionsone.app.offline import run_offline
+from optionsone.app.offline import OfflineRun, run_offline
 from optionsone.app.paper_cmd import (
     UnpromotedModel,
     load_model,
@@ -19,7 +19,7 @@ from optionsone.app.paper_cmd import (
     paper_smoke,
     run_paper,
 )
-from optionsone.app.research_cmd import backfill, research
+from optionsone.app.research_cmd import EmptyStoreError, backfill, backtest_store, research
 from optionsone.classify.stub import DeterministicStubClassifier
 from optionsone.core.clock import LiveClock
 from optionsone.execution.alpaca_paper import AlpacaPaperBroker
@@ -115,37 +115,87 @@ def research_cmd(
 @app.command()
 def backtest(
     fixture: Annotated[bool, typer.Option(help="Use the seeded synthetic fixture.")] = False,
-    days: Annotated[int, typer.Option(min=4)] = 10,
-    seed: Annotated[int, typer.Option()] = 7,
-    registry: Annotated[Path | None, typer.Option(help="Trial registry JSONL path.")] = None,
+    start: Annotated[str | None, typer.Option(help="Store mode: UTC start date")] = None,
+    end: Annotated[str | None, typer.Option(help="Store mode: UTC end date (exclusive)")] = None,
+    symbols: Annotated[str, typer.Option(help="Store mode: restrict to these tickers")] = "",
+    classifier: Annotated[ClassifierKind, typer.Option()] = ClassifierKind.STUB,
+    store: Annotated[Path, typer.Option()] = DATA / "store",
+    train_fraction: Annotated[float, typer.Option(min=0.1, max=0.9)] = 0.5,
+    initial_cash: Annotated[float, typer.Option(min=100.0)] = 100_000.0,
+    days: Annotated[int, typer.Option(min=4, help="Fixture mode: trading days")] = 10,
+    seed: Annotated[int, typer.Option(help="Fixture mode: RNG seed")] = 7,
 ) -> None:
-    """Classify news, evaluate out-of-sample IC on the first half, replay the second half."""
-    if not fixture:
-        typer.echo("Only --fixture is supported offline; see README for the store pipeline.")
+    """Fit on the first part of the timeline, then replay the rest event by event.
+
+    --fixture uses a synthetic market; --start/--end replay your backfilled store.
+    """
+    if fixture == (start is not None or end is not None):
+        typer.echo("error: pass either --fixture or both --start and --end", err=True)
         raise typer.Exit(2)
-    data = synthetic_fixture(days=days, seed=seed)
-    with tempfile.TemporaryDirectory() as tmp:
-        path = registry or Path(tmp) / "trials.jsonl"
-        run = asyncio.run(
-            run_offline(data.articles, data.bars, DeterministicStubClassifier(), path)
-        )
+    if fixture:
+        data = synthetic_fixture(days=days, seed=seed)
+        with tempfile.TemporaryDirectory() as tmp:
+            run = asyncio.run(
+                run_offline(
+                    data.articles,
+                    data.bars,
+                    DeterministicStubClassifier(),
+                    Path(tmp) / "trials.jsonl",
+                    train_fraction=train_fraction,
+                    initial_cash=initial_cash,
+                )
+            )
+    else:
+        if start is None or end is None:
+            typer.echo("error: store mode needs both --start and --end", err=True)
+            raise typer.Exit(2)
+        universe = [s.strip().upper() for s in symbols.split(",") if s.strip()]
+        try:
+            run = asyncio.run(
+                backtest_store(
+                    store,
+                    _utc(start),
+                    _utc(end),
+                    make_classifier(classifier.value, DATA / "cache" / "classifications.sqlite"),
+                    registry_path=DATA / "trials.jsonl",
+                    symbols=universe,
+                    train_fraction=train_fraction,
+                    initial_cash=initial_cash,
+                )
+            )
+        except EmptyStoreError as exc:
+            typer.echo(f"error: {exc}", err=True)
+            raise typer.Exit(2) from exc
+    _print_run(run)
+
+
+def _print_run(run: OfflineRun) -> None:
     r = run.research_train
     bt = run.backtest.report
     typer.echo(f"classifications      {run.n_classifications}")
     typer.echo(f"model_id             {run.model_id}")
-    typer.echo("-- research (purged walk-forward, train half) --")
-    typer.echo(f"oos_rank_ic          {_fmt(r.oos_ic_mean, '+.4f')}")
+    typer.echo(f"replay_start         {run.replay_start:%Y-%m-%d %H:%M}Z")
+    typer.echo("-- research (purged walk-forward, training part) --")
+    typer.echo(f"oos_rank_ic          {_fmt(r.oos_ic_mean, '+.4f')}  (periods={r.n_ic_periods})")
     typer.echo(f"ic_hac_t             {_fmt(r.ic_t_stat, '+.2f')}")
     typer.echo(f"hit_rate             {_fmt(r.hit_rate, '.1%')}")
     typer.echo(f"dsr                  {_fmt(r.dsr, '.3f')}  (trials={r.n_trials})")
-    typer.echo("-- backtest (out-of-sample half) --")
+    typer.echo("-- backtest (out-of-sample replay) --")
+    typer.echo(f"signals              {run.backtest.signals}")
+    for reason, count in run.backtest.skipped:
+        typer.echo(f"  skipped            {count} {reason}")
     typer.echo(f"trades               {len(bt.trades)}")
     typer.echo(f"gross_return         {bt.gross_return:+.4%}")
     typer.echo(f"net_return           {bt.net_return:+.4%}")
+    typer.echo(
+        "net_at_cost_x0/1/2   " + " / ".join(f"{value:+.4%}" for _, value in bt.cost_sensitivity)
+    )
     typer.echo(f"sharpe_per_day       {bt.sharpe_per_day:+.2f}")
     typer.echo(f"max_drawdown         {bt.max_drawdown:.4%}")
+    typer.echo(f"turnover             {bt.turnover:.2f}x")
     typer.echo(f"costs_total          {bt.costs.total:.2f}")
     typer.echo(f"rejected_orders      {len(run.backtest.rejected_orders)}")
+    typer.echo(f"open_at_end          {len(run.backtest.open_positions)}")
 
 
 def _bucket(value: float) -> str:
