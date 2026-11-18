@@ -212,3 +212,26 @@ async def test_failed_attempts_spend_rate_budget_and_stop_at_the_limit() -> None
     assert failed.value.response.status_code == 503
     assert request_times == [0.0, 60.0, 120.0]
     assert delay_times == [1.0, 2.0]
+
+
+async def test_bars_skip_foreign_tickers_chunk_requests_and_isolate_rejected_symbols() -> None:
+    letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    good = [a + b + c for a in letters for b in letters for c in letters][:205]
+    requests: list[list[str]] = []
+
+    def serve(request: httpx.Request) -> httpx.Response:
+        symbols = request.url.params["symbols"].split(",")
+        requests.append(symbols)
+        if "BAD" in symbols:
+            return httpx.Response(400, json={"message": "invalid symbol: BAD"})
+        bar = {"t": _START.isoformat(), "o": 10, "h": 11, "l": 9, "c": 10, "v": 5}
+        return httpx.Response(200, json={"bars": {s: [bar] for s in symbols}})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(serve)) as client:
+        source = AlpacaHistoricalBars(client=client)
+        bars = await source.fetch([*good[:50], "000333", "BAD", "1810", *good[50:]], _START, _END)
+
+    assert {bar.symbol for bar in bars} == set(good)
+    assert source.unsupported_symbols == {"000333", "1810", "BAD"}
+    assert all(len(symbols) <= 100 for symbols in requests)
+    assert not any("000333" in symbols or "1810" in symbols for symbols in requests)

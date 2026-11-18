@@ -63,6 +63,7 @@ def backfill_cmd(
 ) -> None:
     """Download Alpaca news and IEX 1-minute bars into the Parquet store."""
     universe = [s.strip().upper() for s in symbols.split(",") if s.strip()]
+    bar_source = AlpacaHistoricalBars()
     report = asyncio.run(
         backfill(
             store,
@@ -70,11 +71,15 @@ def backfill_cmd(
             _utc(start),
             _utc(end),
             news=AlpacaHistoricalNews(),
-            bars=AlpacaHistoricalBars(),
+            bars=bar_source,
         )
     )
     typer.echo(f"articles fetched/added  {report.articles_fetched}/{report.articles_added}")
     typer.echo(f"bars fetched/added      {report.bars_fetched}/{report.bars_added}")
+    skipped = sorted(bar_source.unsupported_symbols)
+    if skipped:
+        shown = ", ".join(skipped[:12]) + (" ..." if len(skipped) > 12 else "")
+        typer.echo(f"symbols skipped         {len(skipped)} non-US or rejected ({shown})")
     v = report.validation
     typer.echo(
         f"bar quality             gaps={len(v.gaps)} nonpositive={len(v.nonpositive_prices)} "
