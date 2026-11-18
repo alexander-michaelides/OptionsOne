@@ -1,6 +1,9 @@
+from pathlib import Path
+
 import pytest
 
 from optionsone.app.classifiers import ClassifierConfigurationError, make_classifier
+from optionsone.classify.laya_adapter import LayaClassifier
 
 
 def test_hosted_classifier_names_missing_settings(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -22,7 +25,10 @@ def test_hosted_classifier_reads_settings_at_construction(monkeypatch: pytest.Mo
     assert make_classifier("hosted").model_id == "test-model"
 
 
-def test_laya_classifier_names_missing_token(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_laya_classifier_names_missing_token(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.chdir(tmp_path)  # no .env
     monkeypatch.delenv("HF_TOKEN", raising=False)
 
     with pytest.raises(ClassifierConfigurationError, match="HF_TOKEN"):
@@ -38,3 +44,19 @@ def test_invalid_hosted_settings_never_echo_values(monkeypatch: pytest.MonkeyPat
     assert "OPTIONSONE_HOSTED_BASE_URL" in str(info.value)
     assert "SECRETVALUE" not in str(info.value)
     assert info.value.__cause__ is None
+
+
+def test_laya_token_is_read_from_dotenv(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+    (tmp_path / ".env").write_text("HF_TOKEN=hf_from_dotenv\n")
+    seen: list[str] = []
+
+    def fake_from_laya(*, token: str) -> LayaClassifier:
+        seen.append(token)
+        raise RuntimeError("stop before loading a model")
+
+    monkeypatch.setattr(LayaClassifier, "from_laya", staticmethod(fake_from_laya))
+    with pytest.raises(RuntimeError, match="stop before"):
+        make_classifier("laya")
+    assert seen == ["hf_from_dotenv"]

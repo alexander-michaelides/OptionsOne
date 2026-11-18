@@ -1,16 +1,24 @@
 """Construct the classifiers available to application workflows."""
 
-from os import getenv
 from pathlib import Path
 from typing import Literal, assert_never
 
-from pydantic import ValidationError
+from pydantic import SecretStr, ValidationError
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from optionsone.classify.cache import CachedClassifier
 from optionsone.classify.hosted import HostedClassifier, HostedSettings
 from optionsone.classify.laya_adapter import LayaClassifier
 from optionsone.classify.stub import DeterministicStubClassifier
 from optionsone.core.ports import Classifier
+
+
+class _HuggingFaceSettings(BaseSettings):
+    """HF_TOKEN from the environment or ./.env, like the Alpaca credentials."""
+
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore", frozen=True)
+
+    hf_token: SecretStr = SecretStr("")
 
 
 class ClassifierConfigurationError(ValueError):
@@ -30,7 +38,7 @@ def make_classifier(
         case "stub":
             classifier = DeterministicStubClassifier()
         case "laya":
-            token = getenv("HF_TOKEN")
+            token = _HuggingFaceSettings().hf_token.get_secret_value()
             if not token:
                 raise ClassifierConfigurationError(("HF_TOKEN",))
             classifier = LayaClassifier.from_laya(token=token)
