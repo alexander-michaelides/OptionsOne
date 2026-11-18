@@ -1,0 +1,10 @@
+.venv/
+__pycache__/
+.env
+.idea/
+.omo/
+.opencode/
+.pytest_cache/
+.ruff_cache/
+/data/store/
+/data/cache/

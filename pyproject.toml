@@ -1,0 +1,62 @@
+[project]
+name = "optionsone"
+version = "0.1.0"
+description = "News-driven intraday equity research and paper-trading system"
+requires-python = ">=3.14"
+dependencies = [
+  "pydantic>=2.11",
+  "pydantic-settings>=2.6",
+  "httpx>=0.28",
+  "websockets>=14",
+  "polars>=1.30",
+  "numpy>=2.2",
+  "scipy>=1.15",
+  "structlog>=25.1",
+  "typer>=0.15",
+  "stamina>=25.1",
+  "anyio>=4.8",
+]
+
+[project.optional-dependencies]
+laya = ["laya"]
+
+[project.scripts]
+optionsone = "optionsone.app.cli:app"
+
+[dependency-groups]
+dev = ["pytest>=8.3", "pytest-asyncio>=0.25", "hypothesis>=6.120", "ruff>=0.9", "pyright>=1.1.400", "respx>=0.22"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["optionsone"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py314"
+extend-exclude = ["legacy"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "SIM", "RUF", "ASYNC", "PT", "DTZ", "TID"]
+
+[tool.ruff.lint.flake8-tidy-imports.banned-api]
+"datetime.datetime.now".msg = "Use an injected Clock (optionsone.core.clock)."
+"datetime.datetime.utcnow".msg = "Use an injected Clock (optionsone.core.clock)."
+
+[tool.ruff.lint.per-file-ignores]
+"optionsone/core/clock.py" = ["TID251"]
+
+[tool.pyright]
+include = ["optionsone", "tests"]
+exclude = ["legacy", ".venv"]
+pythonVersion = "3.14"
+typeCheckingMode = "strict"
+reportMissingTypeStubs = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+addopts = "-ra --strict-markers"
