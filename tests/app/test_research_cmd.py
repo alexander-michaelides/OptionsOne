@@ -268,3 +268,35 @@ async def test_open_window_is_not_marked_done_and_universes_are_separate(tmp_pat
         tmp_path, (), start, end, news=FakeNews(data.articles), bars=bars, on_day=days.append
     )
     assert [d.resumed for d in days[2:]] == [False, True]
+
+
+async def test_research_universe_limits_classification_to_named_tickers(tmp_path: Path) -> None:
+    data = synthetic_fixture(days=4)
+    start, end = data.bars[0].start, data.bars[-1].end
+    store_root = tmp_path / "store"
+    await backfill(
+        store_root, (), start, end, news=FakeNews(data.articles), bars=FakeBars(data.bars)
+    )
+    classifier = CountingStub()
+    await research(
+        store_root,
+        start,
+        end,
+        classifier,
+        model_out=tmp_path / "m.json",
+        report_out=tmp_path / "r.json",
+        registry_path=tmp_path / "t.jsonl",
+        symbols=("AAA",),
+    )
+    assert classifier.calls == sum("AAA" in a.symbols for a in data.articles)
+    with pytest.raises(EmptyStoreError):
+        await research(
+            store_root,
+            start,
+            end,
+            classifier,
+            model_out=tmp_path / "m.json",
+            report_out=tmp_path / "r.json",
+            registry_path=tmp_path / "t.jsonl",
+            symbols=("NOPE",),
+        )

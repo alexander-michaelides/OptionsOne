@@ -228,9 +228,15 @@ async def research(
     report_out: Path,
     registry_path: Path,
     n_splits: int = 5,
+    symbols: Sequence[str] = (),
 ) -> ResearchReport:
     """Evaluate stored data and export a model fitted using outcomes known before end."""
-    articles, bars = await load_store(store_root, start, end)
+    articles, bars = await load_store(store_root, start, end, symbols)
+    if not articles:
+        raise EmptyStoreError(
+            f"no stored news in [{start:%Y-%m-%d}, {end:%Y-%m-%d}) for this universe; "
+            "run backfill first"
+        )
     classifications = await classify_articles(articles, classifier)
     dataset = purge_dataset(await run_sync(build_dataset, classifications, bars), end)
 

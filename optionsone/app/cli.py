@@ -108,22 +108,29 @@ def research_cmd(
     start: Annotated[str, typer.Option()],
     end: Annotated[str, typer.Option()],
     classifier: Annotated[ClassifierKind, typer.Option()] = ClassifierKind.STUB,
+    symbols: Annotated[str, typer.Option(help="Restrict to these tickers")] = "",
     store: Annotated[Path, typer.Option()] = DATA / "store",
     model_out: Annotated[Path, typer.Option()] = DATA / "models" / "model.json",
 ) -> None:
     """Classify stored news, evaluate with purged walk-forward CV, fit and save the model."""
     model_out.parent.mkdir(parents=True, exist_ok=True)
-    result = asyncio.run(
-        research(
-            store,
-            _utc(start),
-            _utc(end),
-            make_classifier(classifier.value, DATA / "cache" / "classifications.sqlite"),
-            model_out=model_out,
-            report_out=model_out.with_suffix(".report.json"),
-            registry_path=DATA / "trials.jsonl",
+    universe = [s.strip().upper() for s in symbols.split(",") if s.strip()]
+    try:
+        result = asyncio.run(
+            research(
+                store,
+                _utc(start),
+                _utc(end),
+                make_classifier(classifier.value, DATA / "cache" / "classifications.sqlite"),
+                model_out=model_out,
+                report_out=model_out.with_suffix(".report.json"),
+                registry_path=DATA / "trials.jsonl",
+                symbols=universe,
+            )
         )
-    )
+    except EmptyStoreError as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(2) from exc
     e = result.evaluation
     typer.echo(f"model_id             {result.model_id}  -> {model_out}")
     typer.echo(f"oos_rank_ic          {_fmt(e.oos_ic_mean, '+.4f')}  (periods={e.n_ic_periods})")
