@@ -35,6 +35,41 @@ Environment variables (never read at import time):
 - `ALPACA_PAPER_API_KEY`, `ALPACA_PAPER_SECRET_KEY`: paper trading account.
 - Hosted LLM settings for the OpenAI-compatible adapter: base URL, model, and API key (see `optionsone/classify/hosted.py`).
 
+## Paper trading runbook
+
+Credentials come from the environment or `./.env`: `ALPACA_PAPER_API_KEY` / `ALPACA_PAPER_SECRET_KEY`, or the
+generic `ALPACA_API_KEY` / `ALPACA_SECRET_KEY` when they are **paper** keys (`PK...`). Live keys (`AK...`) are
+refused. Market data is the free IEX feed. Everything writes under `data/` (gitignored).
+
+```bash
+uv run optionsone paper-check        # account ACTIVE, market clock, positions, IEX bars reachable
+uv run optionsone paper-smoke        # 1-share SPY limit at 50% of last price -> verify open -> cancel
+
+# 1. Backfill a research window (news + 1-minute bars for the universe and SPY). Idempotent.
+uv run optionsone backfill --start 2026-08-03 --end 2026-11-14 --symbols AAPL,NVDA,TSLA,AMD,MSFT
+
+# 2. Research: classify (cached), PIT features, purged walk-forward CV, fit + save the model.
+#    Use --classifier laya (needs HF_TOKEN) or hosted (OPTIONSONE_HOSTED_* settings); the stub has no edge.
+uv run optionsone research --start 2026-08-03 --end 2026-11-14 --classifier laya
+#    -> data/models/model.json and model.report.json (promotion_gate PASS/FAIL)
+
+# 3. Paper trade during market hours (Ctrl-C stops gracefully; working orders are cancelled).
+uv run optionsone paper --symbols AAPL,NVDA,TSLA,AMD,MSFT --classifier laya
+#    --allow-unpromoted   trade a model that failed the gate (plumbing tests only)
+#    --max-minutes N      bounded run;  --flatten-on-stop  close owned positions on exit
+#    --max-position-pct / --max-open-positions  risk caps (defaults 10% / 5)
+```
+
+What the paper runner does: for each new article (deduped by id and revision) mentioning a universe symbol, it
+classifies the article for that ticker, fetches the last 45 minutes of completed IEX bars, runs the same `decide()` as
+the backtest, then sizes the trade (volatility targeted, skipped below one share), checks limits and the latched kill
+switch, and submits an idempotent market order. A 5-second ticker collects fills, submits horizon exits, and flattens
+the runner's own positions 5 minutes before the NYSE close. Every decision, including each skip and its reason, is
+appended to `data/journal/paper-<timestamp>.jsonl`.
+
+The runner only manages positions and orders it created. Positions already in the account are journaled as foreign
+and never traded, flattened or cancelled; symbols that hold one are skipped.
+
 ## Safety guarantees
 
 - **No live trading exists.** `AlpacaPaperBroker` accepts only `https://paper-api.alpaca.markets` and raises
@@ -55,12 +90,14 @@ Environment variables (never read at import time):
   prompt, bar lookahead) and must not be used for training. A new backfill of several months is needed.
 - **Hosted and laya inference not exercised live.** Both adapters are tested against mocks or fakes only.
 - **Equities only.** Options execution is out of scope for this rebuild.
-- **Paper trading is not yet soak-tested.** The two-week unattended paper run and the fill-deviation check from the
-  plan still have to be done by running it.
-- **CLI is fixture-only for now.** `optionsone backtest --fixture` runs the full pipeline (stub classifier ->
-  point-in-time features -> purged walk-forward research on the first half -> out-of-sample replay on the second half)
-  on a seeded synthetic market with a planted news drift. Backfill and paper-trading commands that wire `ingest` and
-  `AlpacaPaperBroker` into the CLI are not built yet; the components are usable as a library.
+- **Paper trading is plumbing-verified, not soak-tested.** The account check, a real order placement and cancellation,
+  and a bounded runner session were run after the close. A full market-hours session, the two-week unattended run and
+  the fill-vs-simulation deviation check still need to be done.
+- **Ownership does not survive a restart.** On startup every existing position is treated as foreign, including ones a
+  previous run of the runner opened, so they are never exited automatically afterwards. Stop with `--flatten-on-stop`,
+  or close leftover positions manually before restarting.
+- **`backtest` replays the synthetic fixture only.** Research on real data is the `research` command (purged walk-forward);
+  an out-of-sample event replay over the Parquet store is not wired to the CLI yet.
 - **Promotion gate needs data.** It also requires at least 20 daily IC periods, because the HAC t-stat over a few days passed
   pure noise in 17.5% of 40 null simulations.
 - **No monitoring or alerting yet.** Production-readiness items (Phase 8 of the plan) are not built.

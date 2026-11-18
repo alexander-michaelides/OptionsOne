@@ -2,14 +2,31 @@
 
 import asyncio
 import tempfile
+from datetime import UTC, datetime
+from enum import StrEnum
 from pathlib import Path
 from typing import Annotated
 
 import typer
 
+from optionsone.app.classifiers import make_classifier
 from optionsone.app.fixtures import synthetic_fixture
 from optionsone.app.offline import run_offline
+from optionsone.app.paper_cmd import (
+    UnpromotedModel,
+    load_model,
+    paper_check,
+    paper_smoke,
+    run_paper,
+)
+from optionsone.app.research_cmd import backfill, research
 from optionsone.classify.stub import DeterministicStubClassifier
+from optionsone.core.clock import LiveClock
+from optionsone.execution.alpaca_paper import AlpacaPaperBroker
+from optionsone.ingest.alpaca_bars import AlpacaHistoricalBars
+from optionsone.ingest.alpaca_news import AlpacaHistoricalNews
+from optionsone.risk.limits import RiskLimits
+from optionsone.risk.sizing import SizingConfig
 
 app = typer.Typer(no_args_is_help=True, add_completion=False)
 
@@ -21,6 +38,77 @@ def main() -> None:
 
 def _fmt(value: float | None, spec: str) -> str:
     return "n/a" if value is None else format(value, spec)
+
+
+DATA = Path("data")
+
+
+class ClassifierKind(StrEnum):
+    STUB = "stub"
+    LAYA = "laya"
+    HOSTED = "hosted"
+
+
+def _utc(day: str) -> datetime:
+    return datetime.fromisoformat(day).replace(tzinfo=UTC)
+
+
+@app.command("backfill")
+def backfill_cmd(
+    start: Annotated[str, typer.Option(help="UTC start date, e.g. 2026-08-01")],
+    end: Annotated[str, typer.Option(help="UTC end date (exclusive)")],
+    symbols: Annotated[str, typer.Option(help="Comma-separated universe; empty = all news")] = "",
+    store: Annotated[Path, typer.Option()] = DATA / "store",
+) -> None:
+    """Download Alpaca news and IEX 1-minute bars into the Parquet store."""
+    universe = [s.strip().upper() for s in symbols.split(",") if s.strip()]
+    report = asyncio.run(
+        backfill(
+            store,
+            universe,
+            _utc(start),
+            _utc(end),
+            news=AlpacaHistoricalNews(),
+            bars=AlpacaHistoricalBars(),
+        )
+    )
+    typer.echo(f"articles fetched/added  {report.articles_fetched}/{report.articles_added}")
+    typer.echo(f"bars fetched/added      {report.bars_fetched}/{report.bars_added}")
+    v = report.validation
+    typer.echo(
+        f"bar quality             gaps={len(v.gaps)} nonpositive={len(v.nonpositive_prices)} "
+        f"duplicates={len(v.duplicates)} stale_runs={len(v.stale_runs)}"
+    )
+
+
+@app.command("research")
+def research_cmd(
+    start: Annotated[str, typer.Option()],
+    end: Annotated[str, typer.Option()],
+    classifier: Annotated[ClassifierKind, typer.Option()] = ClassifierKind.STUB,
+    store: Annotated[Path, typer.Option()] = DATA / "store",
+    model_out: Annotated[Path, typer.Option()] = DATA / "models" / "model.json",
+) -> None:
+    """Classify stored news, evaluate with purged walk-forward CV, fit and save the model."""
+    model_out.parent.mkdir(parents=True, exist_ok=True)
+    result = asyncio.run(
+        research(
+            store,
+            _utc(start),
+            _utc(end),
+            make_classifier(classifier.value, DATA / "cache" / "classifications.sqlite"),
+            model_out=model_out,
+            report_out=model_out.with_suffix(".report.json"),
+            registry_path=DATA / "trials.jsonl",
+        )
+    )
+    e = result.evaluation
+    typer.echo(f"model_id             {result.model_id}  -> {model_out}")
+    typer.echo(f"oos_rank_ic          {_fmt(e.oos_ic_mean, '+.4f')}  (periods={e.n_ic_periods})")
+    typer.echo(f"ic_hac_t             {_fmt(e.ic_t_stat, '+.2f')}")
+    typer.echo(f"net_mean_return      {_fmt(e.net_mean_return, '+.5f')}")
+    typer.echo(f"dsr                  {_fmt(e.dsr, '.3f')}  (trials={e.n_trials})")
+    typer.echo(f"promotion_gate       {'PASS' if result.passes_promotion_gate else 'FAIL'}")
 
 
 @app.command()
@@ -57,3 +145,83 @@ def backtest(
     typer.echo(f"max_drawdown         {bt.max_drawdown:.4%}")
     typer.echo(f"costs_total          {bt.costs.total:.2f}")
     typer.echo(f"rejected_orders      {len(run.backtest.rejected_orders)}")
+
+
+def _bucket(value: float) -> str:
+    """Summarize money without printing exact balances."""
+    return f"~{round(value, -3):,.0f}"
+
+
+@app.command("paper-check")
+def paper_check_cmd() -> None:
+    """Verify paper credentials, market clock, positions and IEX data access."""
+    result = asyncio.run(paper_check(AlpacaPaperBroker(), AlpacaHistoricalBars(), LiveClock()))
+    a, m = result.account, result.clock
+    typer.echo("endpoint             paper-api.alpaca.markets (paper only)")
+    typer.echo(f"account_status       {a.status}")
+    typer.echo(f"trading_blocked      {a.trading_blocked}")
+    typer.echo(f"equity               {_bucket(a.equity)} {a.currency}")
+    typer.echo(f"buying_power         {_bucket(a.buying_power)} {a.currency}")
+    typer.echo(f"market_open          {m.is_open}  next_open {m.next_open:%Y-%m-%d %H:%M %z}")
+    typer.echo(f"open_positions       {result.open_positions}")
+    typer.echo(f"spy_iex_bars_4d      {result.recent_bars}")
+    if a.status != "ACTIVE" or a.trading_blocked or result.recent_bars == 0:
+        raise typer.Exit(1)
+
+
+@app.command("paper-smoke")
+def paper_smoke_cmd(symbol: Annotated[str, typer.Option()] = "SPY") -> None:
+    """Place a non-marketable 1-share paper limit order, then cancel it."""
+    result = asyncio.run(
+        paper_smoke(AlpacaPaperBroker(), AlpacaHistoricalBars(), LiveClock(), symbol=symbol)
+    )
+    typer.echo(f"symbol               {result.symbol}")
+    typer.echo(f"reference_price      {result.reference_price:.2f}")
+    typer.echo(f"limit_price          {result.limit_price:.2f}")
+    typer.echo(f"status_transitions   {' -> '.join(result.statuses)}")
+    typer.echo(f"result               {'PASS' if result.ok else 'FAIL'}")
+    if not result.ok:
+        raise typer.Exit(1)
+
+
+@app.command("paper")
+def paper_cmd(
+    symbols: Annotated[str, typer.Option(help="Comma-separated tradable universe")],
+    model: Annotated[Path, typer.Option()] = DATA / "models" / "model.json",
+    classifier: Annotated[ClassifierKind, typer.Option()] = ClassifierKind.STUB,
+    allow_unpromoted: Annotated[
+        bool, typer.Option(help="Trade a model that failed the gate")
+    ] = False,
+    max_minutes: Annotated[float | None, typer.Option(help="Stop after N minutes")] = None,
+    flatten_on_stop: Annotated[bool, typer.Option()] = False,
+    max_position_pct: Annotated[float, typer.Option(min=0.001, max=1.0)] = 0.10,
+    max_open_positions: Annotated[int, typer.Option(min=1)] = 5,
+) -> None:
+    """Run the news -> classify -> decide -> risk -> PAPER order loop (Ctrl-C to stop)."""
+    universe = frozenset(s.strip().upper() for s in symbols.split(",") if s.strip())
+    if not universe:
+        raise typer.BadParameter("--symbols must name at least one ticker")
+    journal = DATA / "journal" / f"paper-{LiveClock().now():%Y%m%dT%H%M%SZ}.jsonl"
+    journal.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        signal_model = load_model(model, allow_unpromoted=allow_unpromoted)
+    except (UnpromotedModel, FileNotFoundError) as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(2) from exc
+    typer.echo(f"paper runner: model {signal_model.model_id[:12]} universe {sorted(universe)}")
+    typer.echo(f"journal: {journal}")
+    reset_code = asyncio.run(
+        run_paper(
+            model=signal_model,
+            classifier=make_classifier(classifier.value, DATA / "cache" / "classifications.sqlite"),
+            universe=universe,
+            journal_path=journal,
+            max_minutes=max_minutes,
+            flatten_on_stop=flatten_on_stop,
+            limits=RiskLimits(
+                max_position_notional_pct=max_position_pct, max_open_positions=max_open_positions
+            ),
+            sizing=SizingConfig(max_position_pct=max_position_pct),
+        )
+    )
+    typer.echo(f"stopped. kill-switch reset code for this run was {reset_code}")
