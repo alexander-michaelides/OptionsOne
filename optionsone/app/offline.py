@@ -73,7 +73,8 @@ def build_dataset(classifications: Sequence[Classification], bars: Sequence[Bar]
     return Dataset(tuple(features), labels)
 
 
-def _purge(dataset: Dataset, cut: datetime) -> Dataset:
+def purge_dataset(dataset: Dataset, cut: datetime) -> Dataset:
+    """Keep samples whose outcomes are fully realized before the cutoff."""
     keep = tuple(
         f
         for f in dataset.features
@@ -86,6 +87,17 @@ def _purge(dataset: Dataset, cut: datetime) -> Dataset:
             for f in keep
         },
     )
+
+
+def evaluate_and_fit(
+    dataset: Dataset, registry_path: Path, n_splits: int
+) -> tuple[EvaluationReport, LinearSignalModel]:
+    """Evaluate with purged folds, then refit on all eligible samples."""
+    report = evaluate(
+        dataset.features, dataset.labels, n_splits, registry=TrialRegistry(registry_path)
+    )
+    targets = [dataset.labels[f.article_id, f.ticker, f.as_of].raw_return for f in dataset.features]
+    return report, LinearSignalModel.fit(dataset.features, targets)
 
 
 async def run_offline(
@@ -102,10 +114,8 @@ async def run_offline(
     ordered = sorted(classifications, key=lambda c: (c.knowledge_time, c.article_id))
     cut = ordered[int(len(ordered) * train_fraction)].knowledge_time
     # Purge: a training sample is usable only if its label was fully realised before replay.
-    train = _purge(build_dataset([c for c in ordered if c.knowledge_time < cut], bars), cut)
-    report = evaluate(train.features, train.labels, n_splits, registry=TrialRegistry(registry_path))
-    targets = [train.labels[f.article_id, f.ticker, f.as_of].raw_return for f in train.features]
-    model = LinearSignalModel.fit(train.features, targets)
+    train = purge_dataset(build_dataset([c for c in ordered if c.knowledge_time < cut], bars), cut)
+    report, model = evaluate_and_fit(train, registry_path, n_splits)
     test_events = [c for c in ordered if c.knowledge_time >= cut]
     test_bars = [b for b in bars if b.end > cut - _WARMUP]
     strategy = NewsStrategy(test_events, model, is_regular_session)
