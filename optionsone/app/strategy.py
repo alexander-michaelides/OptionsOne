@@ -1,4 +1,4 @@
-"""The news strategy shared by backtest replay and (future) paper trading."""
+"""Replay classified articles through the shared news decision."""
 
 from collections.abc import Callable, Iterator, Sequence
 from datetime import datetime
@@ -6,9 +6,8 @@ from datetime import datetime
 from optionsone.backtest.portfolio import PortfolioSnapshot
 from optionsone.core.pit import PointInTimeBars
 from optionsone.core.types import Classification, Signal
-from optionsone.features.pipeline import build_features
+from optionsone.signals.decide import decide
 from optionsone.signals.model import SignalModel
-from optionsone.signals.rules import passes_pre_trade
 
 
 class NewsStrategy:
@@ -40,15 +39,14 @@ class NewsStrategy:
     ) -> Sequence[Signal]:
         signals: list[Signal] = []
         for classification in portfolio.events:
-            fv = build_features(classification, pit_bars)
-            if fv is None or not passes_pre_trade(
-                fv,
-                self._is_regular_session,
+            signal = decide(
+                classification,
+                pit_bars,
+                self._model,
+                is_regular_session=self._is_regular_session,
                 min_company_relevance=self._min_company_relevance,
                 min_novelty=self._min_novelty,
-            ):
-                continue
-            signal = self._model.predict(fv)
+            )
             if signal is not None:
                 signals.append(signal)
         return signals
