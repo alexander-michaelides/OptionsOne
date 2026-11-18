@@ -10,6 +10,7 @@ from optionsone.core.pit import LookaheadError, PointInTimeBars
 from optionsone.core.types import Bar, Side, Signal
 from optionsone.execution.costs import CostModel, Liquidity
 from optionsone.risk.kill_switch import KillSwitch, KillSwitchConfig
+from optionsone.risk.sizing import SizingConfig
 
 START = datetime(2026, 1, 5, 14, 30, tzinfo=UTC)
 MINUTE = timedelta(minutes=1)
@@ -87,7 +88,7 @@ async def test_golden_news_trade_matches_hand_calculated_net_pnl() -> None:
     )
 
 
-async def test_latency_uses_first_eligible_open_and_session_liquidates_at_close() -> None:
+async def test_appending_an_incomplete_bar_does_not_change_the_replay_prefix() -> None:
     bars = [
         bar(0, 100, 100),
         bar(1, 100, 100),
@@ -96,21 +97,65 @@ async def test_latency_uses_first_eligible_open_and_session_liquidates_at_close(
         bar(4, 120, 121),
     ]
     decision = START + 2 * MINUTE
-    strategy = NewsStrategy(signal(decision, 20 * MINUTE))
+    as_of = bars[-1].end
+    truncated = NewsStrategy(signal(decision, 20 * MINUTE))
+    extended = NewsStrategy(signal(decision, 20 * MINUTE))
+    costs = CostModel(commission_per_share=0, half_spread_bps=0)
+    latency = timedelta(seconds=1)
+
+    short_result = await run_backtest(
+        truncated, bars, initial_cash=10_000, latency=latency, costs=costs
+    )
+    long_result = await run_backtest(
+        extended, [*bars, bar(5, 130, 140)], initial_cash=10_000, latency=latency, costs=costs
+    )
+
+    assert truncated.observed[as_of] == extended.observed[as_of]
+    assert short_result.equity_curve == long_result.equity_curve[:-1]
+    assert short_result.executions == long_result.executions
+    (position,) = short_result.open_positions
+    assert (position.symbol, position.qty, position.avg_price) == ("A", 10, 110)
+    assert short_result.report.trades == ()
+
+
+@pytest.mark.parametrize(("eta", "exit_price", "total_impact"), [(0, 150, 0), (0.2, 149.94, 1.04)])
+async def test_session_liquidation_uses_first_eligible_open_after_cutoff_and_latency(
+    eta: float, exit_price: float, total_impact: float
+) -> None:
+    bars = [
+        bar(0, 100, 100),
+        bar(1, 100, 100),
+        bar(2, 105, 106),
+        bar(3, 110, 111),
+        bar(4, 120, 121),
+        bar(5, 130, 140),
+        bar(6, 150, 155),
+        bar(7, 156, 157),
+        bar(8, 158, 159),
+    ]
+    cutoff = START + 5 * MINUTE
+    strategy = NewsStrategy(
+        signal(START + 2 * MINUTE, 20 * MINUTE),
+        signal(START + 7 * MINUTE, 20 * MINUTE, article_id=2),
+    )
     result = await run_backtest(
         strategy,
         bars,
         initial_cash=10_000,
         latency=timedelta(seconds=1),
-        costs=CostModel(commission_per_share=0, half_spread_bps=0, eta=0.2),
+        sizing=SizingConfig(target_bar_vol=1),
+        costs=CostModel(commission_per_share=0, half_spread_bps=0, eta=eta),
         liquidity=lambda _symbol, _as_of: Liquidity(sigma=0.02, adv=1000),
+        session_close=lambda _day: cutoff + 4 * MINUTE,
+        flatten_before=4 * MINUTE,
     )
 
     entry, exit_ = result.executions
     assert (entry.fill.filled_at, entry.reference_price) == (bars[3].start, 110)
-    assert (exit_.fill.filled_at, exit_.reference_price) == (bars[4].end, 121)
-    assert result.report.costs.impact == pytest.approx(0.924)
-    assert strategy.observed[bars[4].end].positions == ()
+    assert (exit_.fill.filled_at, exit_.reference_price) == (bars[6].start, 150)
+    assert exit_.fill.price == pytest.approx(exit_price)
+    assert result.report.costs.impact == pytest.approx(total_impact)
+    assert result.open_positions == ()
 
 
 async def test_engine_propagates_lookahead_when_forced_to_read_incomplete_fill_bar(

@@ -7,10 +7,9 @@ from datetime import datetime, timedelta
 from optionsone.core.clock import Clock
 from optionsone.core.pit import LookaheadError, PointInTimeBars
 from optionsone.core.ports import Broker
-from optionsone.core.types import Bar, Fill, OrderIntent, Position
+from optionsone.core.types import Fill, OrderIntent, Position
 from optionsone.execution.costs import DEFAULT_COSTS, CostModel, ExecutionCosts, Liquidity
 from optionsone.execution.order_manager import position_after_fill
-from optionsone.risk.limits import signed_qty
 
 type LiquiditySource = Callable[[str, datetime], Liquidity | None]
 
@@ -71,25 +70,14 @@ class SimBroker(Broker):
             if bar is not None:
                 if bar.end > self._clock.now() or bar.start < eligible_at:
                     raise LookaheadError(f"ineligible fill bar for {symbol} at {bar.start}")
-                self._execute(order, bar.open, bar.start, order.created_at)
+                self._execute(order, bar.open, bar.start)
                 del self._pending[order.client_order_id]
-
-    def settle_session_close(self, order: OrderIntent, bar: Bar) -> None:
-        """Settle the replay's standing liquidation instruction at the final close."""
-        if bar.end != self._clock.now() or self._bars.last_bar(order.symbol) != bar:
-            raise LookaheadError(f"unavailable closing bar for {order.symbol} at {bar.start}")
-        position = self._positions.get(order.symbol)
-        if position is None or position.qty != -signed_qty(order):
-            raise InvalidSessionLiquidation(order.symbol)
-        self._execute(order, bar.close, bar.end, bar.start)
 
     def execution(self, client_id: str) -> SimExecution:
         return self._executions[client_id]
 
-    def _execute(
-        self, order: OrderIntent, reference: float, when: datetime, liquidity_asof: datetime
-    ) -> None:
-        liquidity = self._liquidity(order.symbol, liquidity_asof) if self._liquidity else None
+    def _execute(self, order: OrderIntent, reference: float, when: datetime) -> None:
+        liquidity = self._liquidity(order.symbol, order.created_at) if self._liquidity else None
         price, costs = self._costs.quote(reference, order.qty, order.side, liquidity)
         fill = Fill(
             client_order_id=order.client_order_id,
@@ -116,11 +104,6 @@ class SimBroker(Broker):
     async def positions(self) -> Sequence[Position]:
         return tuple(self._positions.values())
 
-    def cancel_symbol(self, symbol: str) -> None:
-        self._pending = {
-            key: order for key, order in self._pending.items() if order.symbol != symbol
-        }
-
     async def cancel_all(self) -> None:
         self._pending.clear()
 
@@ -128,8 +111,3 @@ class SimBroker(Broker):
 class NegativeLatencyError(ValueError):
     def __init__(self, latency: timedelta) -> None:
         super().__init__(f"latency cannot be negative: {latency}")
-
-
-class InvalidSessionLiquidation(ValueError):
-    def __init__(self, symbol: str) -> None:
-        super().__init__(f"closing auction must flatten the entire position in {symbol}")

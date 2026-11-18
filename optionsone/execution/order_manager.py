@@ -124,8 +124,7 @@ class OrderManager:
             if deadline <= now and not self.has_working_order(symbol)
         )
 
-    def forget_working(self, symbol: str) -> None:
+    async def cancel_all(self) -> None:
         """Release reservations after broker-side cancellation."""
-        self._working = {
-            key: work for key, work in self._working.items() if work.order.symbol != symbol
-        }
+        await self._broker.cancel_all()
+        self._working.clear()
