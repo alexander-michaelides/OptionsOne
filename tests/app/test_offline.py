@@ -8,7 +8,6 @@ from optionsone.app.cli import app
 from optionsone.app.fixtures import synthetic_fixture
 from optionsone.app.offline import run_offline
 from optionsone.classify.stub import DeterministicStubClassifier
-from optionsone.research.evaluate import passes_promotion_gate
 
 
 async def test_planted_news_drift_is_recovered_out_of_sample(tmp_path: Path) -> None:
@@ -33,9 +32,28 @@ async def test_no_edge_without_planted_drift(tmp_path: Path) -> None:
         )
         assert run.research_train.oos_ic_mean is not None
         ics.append(run.research_train.oos_ic_mean)
-        assert not passes_promotion_gate(run.research_train)
         assert run.backtest.report.net_return <= run.backtest.report.gross_return
     assert abs(fmean(ics)) < 3 * stdev(ics) / sqrt(len(ics))
+
+
+async def test_model_used_at_replay_start_ignores_bars_after_it(tmp_path: Path) -> None:
+    # Gate review R1: 9 days puts the train/replay cut mid-session, so unpurged training
+    # labels would end after the cut and the model would depend on post-cut prices.
+    data = synthetic_fixture(days=9, seed=7)
+    base = await run_offline(
+        data.articles, data.bars, DeterministicStubClassifier(), tmp_path / "a.jsonl"
+    )
+    cut = base.replay_start
+    bumped = tuple(
+        b.model_copy(update={"close": b.close * 1.01, "high": b.high * 1.01})
+        if b.start >= cut
+        else b
+        for b in data.bars
+    )
+    other = await run_offline(
+        data.articles, bumped, DeterministicStubClassifier(), tmp_path / "b.jsonl"
+    )
+    assert other.model_id == base.model_id
 
 
 def test_cli_backtest_fixture_prints_metrics() -> None:

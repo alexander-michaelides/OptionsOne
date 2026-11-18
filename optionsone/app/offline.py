@@ -2,7 +2,7 @@
 
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from optionsone.app.strategy import NewsStrategy
@@ -34,6 +34,7 @@ class OfflineRun:
     n_classifications: int
     research_train: EvaluationReport
     model_id: str
+    replay_start: datetime
     backtest: BacktestResult
 
 
@@ -72,6 +73,21 @@ def build_dataset(classifications: Sequence[Classification], bars: Sequence[Bar]
     return Dataset(tuple(features), labels)
 
 
+def _purge(dataset: Dataset, cut: datetime) -> Dataset:
+    keep = tuple(
+        f
+        for f in dataset.features
+        if dataset.labels[f.article_id, f.ticker, f.as_of].end_time < cut
+    )
+    return Dataset(
+        keep,
+        {
+            (f.article_id, f.ticker, f.as_of): dataset.labels[f.article_id, f.ticker, f.as_of]
+            for f in keep
+        },
+    )
+
+
 async def run_offline(
     articles: Sequence[Article],
     bars: Sequence[Bar],
@@ -85,7 +101,8 @@ async def run_offline(
     classifications = await classify_articles(articles, classifier)
     ordered = sorted(classifications, key=lambda c: (c.knowledge_time, c.article_id))
     cut = ordered[int(len(ordered) * train_fraction)].knowledge_time
-    train = build_dataset([c for c in ordered if c.knowledge_time < cut], bars)
+    # Purge: a training sample is usable only if its label was fully realised before replay.
+    train = _purge(build_dataset([c for c in ordered if c.knowledge_time < cut], bars), cut)
     report = evaluate(train.features, train.labels, n_splits, registry=TrialRegistry(registry_path))
     targets = [train.labels[f.article_id, f.ticker, f.as_of].raw_return for f in train.features]
     model = LinearSignalModel.fit(train.features, targets)
@@ -93,4 +110,4 @@ async def run_offline(
     test_bars = [b for b in bars if b.end > cut - _WARMUP]
     strategy = NewsStrategy(test_events, model, is_regular_session)
     result = await run_backtest(strategy, test_bars)
-    return OfflineRun(len(classifications), report, model.model_id, result)
+    return OfflineRun(len(classifications), report, model.model_id, cut, result)
