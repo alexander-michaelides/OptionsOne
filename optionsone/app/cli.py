@@ -19,6 +19,7 @@ from optionsone.app.paper_cmd import (
     paper_smoke,
     run_paper,
 )
+from optionsone.app.progress import ConsoleProgress
 from optionsone.app.research_cmd import (
     DayProgress,
     EmptyStoreError,
@@ -115,6 +116,7 @@ def research_cmd(
     """Classify stored news, evaluate with purged walk-forward CV, fit and save the model."""
     model_out.parent.mkdir(parents=True, exist_ok=True)
     universe = [s.strip().upper() for s in symbols.split(",") if s.strip()]
+    progress = ConsoleProgress()
     try:
         result = asyncio.run(
             research(
@@ -126,8 +128,10 @@ def research_cmd(
                 report_out=model_out.with_suffix(".report.json"),
                 registry_path=DATA / "trials.jsonl",
                 symbols=universe,
+                progress=progress,
             )
         )
+        progress.close()
     except EmptyStoreError as exc:
         typer.echo(f"error: {exc}", err=True)
         raise typer.Exit(2) from exc
@@ -160,6 +164,7 @@ def backtest(
     if fixture == (start is not None or end is not None):
         typer.echo("error: pass either --fixture or both --start and --end", err=True)
         raise typer.Exit(2)
+    progress = ConsoleProgress()
     if fixture:
         data = synthetic_fixture(days=days, seed=seed)
         with tempfile.TemporaryDirectory() as tmp:
@@ -171,6 +176,7 @@ def backtest(
                     Path(tmp) / "trials.jsonl",
                     train_fraction=train_fraction,
                     initial_cash=initial_cash,
+                    progress=progress,
                 )
             )
     else:
@@ -189,11 +195,13 @@ def backtest(
                     symbols=universe,
                     train_fraction=train_fraction,
                     initial_cash=initial_cash,
+                    progress=progress,
                 )
             )
         except EmptyStoreError as exc:
             typer.echo(f"error: {exc}", err=True)
             raise typer.Exit(2) from exc
+    progress.close()
     _print_run(run)
 
 

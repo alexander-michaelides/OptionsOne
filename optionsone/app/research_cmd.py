@@ -11,6 +11,7 @@ from anyio import Path as AsyncPath
 from anyio.to_thread import run_sync
 
 from optionsone.app.offline import (
+    SILENT,
     OfflineRun,
     build_dataset,
     classify_articles,
@@ -18,6 +19,7 @@ from optionsone.app.offline import (
     purge_dataset,
     run_offline,
 )
+from optionsone.app.progress import Progress
 from optionsone.core.clock import Clock, LiveClock
 from optionsone.core.ports import Classifier, HistoricalBars, HistoricalNews
 from optionsone.core.types import Article, Bar
@@ -168,9 +170,14 @@ class EmptyStoreError(ValueError):
 
 
 async def load_store(
-    store_root: Path, start: datetime, end: datetime, symbols: Sequence[str] = ()
+    store_root: Path,
+    start: datetime,
+    end: datetime,
+    symbols: Sequence[str] = (),
+    progress: Progress = SILENT,
 ) -> tuple[list[Article], list[Bar]]:
     """Stored news in [start, end), optionally narrowed to a universe, plus bars it needs."""
+    progress.stage("load", f"{store_root} [{start:%Y-%m-%d}, {end:%Y-%m-%d})")
     store = ParquetStore(store_root)
     articles = await run_sync(store.load_articles, start, end)
     universe = {symbol.upper() for symbol in symbols}
@@ -183,7 +190,11 @@ async def load_store(
             if not universe.isdisjoint(article.symbols)
         ]
     needed = sorted({symbol for article in articles for symbol in article.symbols} | {_BENCHMARK})
+    progress.note(
+        f"{len(articles):,} articles mention the universe; loading bars for {len(needed)} symbols"
+    )
     bars = await run_sync(store.load_bars, needed, start, end)
+    progress.note(f"{len(bars):,} one-minute bars loaded")
     return articles, bars
 
 
@@ -198,9 +209,10 @@ async def backtest_store(
     train_fraction: float = 0.5,
     n_splits: int = 4,
     initial_cash: float = 100_000.0,
+    progress: Progress = SILENT,
 ) -> OfflineRun:
     """Fit on the earlier part of the stored window, replay the rest through the engine."""
-    articles, bars = await load_store(store_root, start, end, symbols)
+    articles, bars = await load_store(store_root, start, end, symbols, progress)
     if not articles:
         raise EmptyStoreError(
             f"no stored news in [{start:%Y-%m-%d}, {end:%Y-%m-%d}) for this universe; "
@@ -215,6 +227,7 @@ async def backtest_store(
         train_fraction=train_fraction,
         n_splits=n_splits,
         initial_cash=initial_cash,
+        progress=progress,
     )
 
 
@@ -229,19 +242,21 @@ async def research(
     registry_path: Path,
     n_splits: int = 5,
     symbols: Sequence[str] = (),
+    progress: Progress = SILENT,
 ) -> ResearchReport:
     """Evaluate stored data and export a model fitted using outcomes known before end."""
-    articles, bars = await load_store(store_root, start, end, symbols)
+    articles, bars = await load_store(store_root, start, end, symbols, progress)
     if not articles:
         raise EmptyStoreError(
             f"no stored news in [{start:%Y-%m-%d}, {end:%Y-%m-%d}) for this universe; "
             "run backfill first"
         )
-    classifications = await classify_articles(articles, classifier)
-    dataset = purge_dataset(await run_sync(build_dataset, classifications, bars), end)
+    classifications = await classify_articles(articles, classifier, progress=progress)
+    dataset = purge_dataset(await run_sync(build_dataset, classifications, bars, progress), end)
 
     await AsyncPath(registry_path.parent).mkdir(parents=True, exist_ok=True)
-    evaluation, model = await run_sync(evaluate_and_fit, dataset, registry_path, n_splits)
+    evaluation, model = await run_sync(evaluate_and_fit, dataset, registry_path, n_splits, progress)
+    progress.stage("save", f"model -> {model_out}, report -> {report_out}")
     passed = passes_promotion_gate(evaluation)
     report_json = dumps(
         {**asdict(evaluation), "passes_promotion_gate": passed}, indent=2, allow_nan=False

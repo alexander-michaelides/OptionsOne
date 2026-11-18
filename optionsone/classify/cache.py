@@ -20,6 +20,8 @@ class CachedClassifier:
         self._path = path
         self._initialize_lock = asyncio.Lock()
         self._initialized = False
+        self.hits = 0
+        self.misses = 0
 
     @property
     def model_id(self) -> str:
@@ -75,7 +77,9 @@ class CachedClassifier:
         key = (article.id, article.updated_at.isoformat(), ticker, self.model_id, PROMPT_VERSION)
         cached = await asyncio.to_thread(self._lookup, key)
         if cached is not None:
+            self.hits += 1
             return cached
+        self.misses += 1
         classification = await self._classifier.classify(article, ticker)
         await asyncio.to_thread(self._store, key, classification)
         return classification

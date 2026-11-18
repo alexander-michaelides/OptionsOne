@@ -60,6 +60,7 @@ async def run_backtest[Payload](
     kill_switch: KillSwitch | None = None,
     session_close: Callable[[date], datetime | None] = exchange_session_close,
     flatten_before: timedelta = timedelta(minutes=5),
+    on_session: Callable[[date], None] | None = None,
 ) -> BacktestResult:
     """Replay regular-session bars and submit exits from the calendar-defined cutoff."""
     if not isfinite(initial_cash) or initial_cash <= 0:
@@ -96,6 +97,7 @@ async def run_backtest[Payload](
     orders: deque[datetime] = deque()
     n_signals = 0
     skipped: Counter[str] = Counter()
+    last_session: date | None = None
 
     while timeline or event is not None:
         if timeline and (event is None or timeline[0] <= event[0]):
@@ -107,6 +109,9 @@ async def run_backtest[Payload](
             break
         clock.advance_to(now)
         session = now.astimezone(EXCHANGE_TZ).date()
+        if on_session is not None and session != last_session:
+            on_session(session)
+        last_session = session
         close = session_close(session)
         flattening = close is not None and now >= close - flatten_before
         if kill_switch is not None:
