@@ -1,6 +1,5 @@
 """Construct the classifiers available to application workflows."""
 
-from dataclasses import dataclass
 from os import getenv
 from pathlib import Path
 from typing import Literal, assert_never
@@ -14,12 +13,12 @@ from optionsone.classify.stub import DeterministicStubClassifier
 from optionsone.core.ports import Classifier
 
 
-@dataclass(frozen=True, slots=True)
 class ClassifierConfigurationError(ValueError):
-    missing: tuple[str, ...]
-
-    def __str__(self) -> str:
-        return f"Missing classifier environment variables: {', '.join(self.missing)}"
+    def __init__(self, missing: tuple[str, ...]) -> None:
+        self.missing = missing
+        super().__init__(
+            f"Missing or invalid classifier environment variables: {', '.join(missing)}"
+        )
 
 
 def make_classifier(
@@ -39,14 +38,11 @@ def make_classifier(
             try:
                 settings = HostedSettings.model_validate({})
             except ValidationError as exc:
-                missing = tuple(
-                    f"OPTIONSONE_HOSTED_{str(issue['loc'][0]).upper()}"
-                    for issue in exc.errors()
-                    if issue["type"] == "missing"
+                # Name the variables only; pydantic's error text echoes the configured values.
+                invalid = tuple(
+                    f"OPTIONSONE_HOSTED_{str(issue['loc'][0]).upper()}" for issue in exc.errors()
                 )
-                if missing:
-                    raise ClassifierConfigurationError(missing) from exc
-                raise
+                raise ClassifierConfigurationError(invalid) from None
             classifier = HostedClassifier(settings)
         case _:
             assert_never(kind)

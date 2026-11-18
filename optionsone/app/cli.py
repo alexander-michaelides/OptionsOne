@@ -28,7 +28,8 @@ from optionsone.ingest.alpaca_news import AlpacaHistoricalNews
 from optionsone.risk.limits import RiskLimits
 from optionsone.risk.sizing import SizingConfig
 
-app = typer.Typer(no_args_is_help=True, add_completion=False)
+# Never render local variables in tracebacks: they can hold credentials.
+app = typer.Typer(no_args_is_help=True, add_completion=False, pretty_exceptions_show_locals=False)
 
 
 @app.callback()
@@ -210,7 +211,7 @@ def paper_cmd(
         raise typer.Exit(2) from exc
     typer.echo(f"paper runner: model {signal_model.model_id[:12]} universe {sorted(universe)}")
     typer.echo(f"journal: {journal}")
-    reset_code = asyncio.run(
+    asyncio.run(
         run_paper(
             model=signal_model,
             classifier=make_classifier(classifier.value, DATA / "cache" / "classifications.sqlite"),
@@ -224,4 +225,4 @@ def paper_cmd(
             sizing=SizingConfig(max_position_pct=max_position_pct),
         )
     )
-    typer.echo(f"stopped. kill-switch reset code for this run was {reset_code}")
+    typer.echo("stopped. Working orders cancelled; see the journal for every decision.")

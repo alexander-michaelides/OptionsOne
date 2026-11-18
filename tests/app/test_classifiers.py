@@ -27,3 +27,14 @@ def test_laya_classifier_names_missing_token(monkeypatch: pytest.MonkeyPatch) ->
 
     with pytest.raises(ClassifierConfigurationError, match="HF_TOKEN"):
         make_classifier("laya")
+
+
+def test_invalid_hosted_settings_never_echo_values(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("OPTIONSONE_HOSTED_BASE_URL", "not a url")
+    monkeypatch.setenv("OPTIONSONE_HOSTED_MODEL", "m")
+    monkeypatch.setenv("OPTIONSONE_HOSTED_API_KEY", "sk-SECRETVALUE")
+    with pytest.raises(ClassifierConfigurationError) as info:
+        make_classifier("hosted")
+    assert "OPTIONSONE_HOSTED_BASE_URL" in str(info.value)
+    assert "SECRETVALUE" not in str(info.value)
+    assert info.value.__cause__ is None

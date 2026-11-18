@@ -131,8 +131,12 @@ async def run_paper(
     flatten_on_stop: bool,
     limits: RiskLimits,
     sizing: SizingConfig,
-) -> str:
-    """Run until SIGINT/SIGTERM or max_minutes. Returns the kill-switch reset code used."""
+) -> None:
+    """Run until SIGINT/SIGTERM or max_minutes.
+
+    The kill switch latches for the rest of the run; its reset code is random and never shown,
+    so a breach can only be cleared by restarting the process after reviewing the journal.
+    """
     clock = LiveClock()
     broker = AlpacaPaperBroker(clock=clock)
     reset_code = secrets.token_hex(8)
@@ -163,4 +167,3 @@ async def run_paper(
     finally:
         for sig in (signal.SIGINT, signal.SIGTERM):
             loop.remove_signal_handler(sig)
-    return reset_code

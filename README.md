@@ -39,7 +39,8 @@ Environment variables (never read at import time):
 
 Credentials come from the environment or `./.env`: `ALPACA_PAPER_API_KEY` / `ALPACA_PAPER_SECRET_KEY`, or the
 generic `ALPACA_API_KEY` / `ALPACA_SECRET_KEY` when they are **paper** keys (`PK...`). Live keys (`AK...`) are
-refused. Market data is the free IEX feed. Everything writes under `data/` (gitignored).
+refused for both trading and market data, and configuration errors name variables without echoing their values.
+Market data is the free IEX feed. Everything writes under `data/` (gitignored).
 
 ```bash
 uv run optionsone paper-check        # account ACTIVE, market clock, positions, IEX bars reachable
@@ -58,6 +59,8 @@ uv run optionsone paper --symbols AAPL,NVDA,TSLA,AMD,MSFT --classifier laya
 #    --allow-unpromoted   trade a model that failed the gate (plumbing tests only)
 #    --max-minutes N      bounded run;  --flatten-on-stop  close owned positions on exit
 #    --max-position-pct / --max-open-positions  risk caps (defaults 10% / 5)
+#    A kill-switch breach (3% daily loss / 15% drawdown) latches for the rest of the run; review the
+#    journal, then restart to clear it.
 ```
 
 What the paper runner does: for each new article (deduped by id and revision) mentioning a universe symbol, it
